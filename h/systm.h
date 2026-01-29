@@ -58,7 +58,7 @@ extern int  rablock;    /* block to be read ahead */
 struct sysent
 {
     int count;          /* argument count */
-    int (*call)(void);  /* name of handler */
+    void (*call)(void);  /* name of handler */
 };
 extern struct sysent sysent[64];
 

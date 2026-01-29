@@ -14,7 +14,7 @@
  * call (like read on a typewriter) got interrupted
  * by a signal.
  */
-void trap1(int (*f)())
+void trap1(void (*f)())
 {
     u.u_intflg = 1;
     if (save(u.u_qsav)) {
