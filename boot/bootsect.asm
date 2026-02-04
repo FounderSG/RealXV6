@@ -121,6 +121,8 @@ LBA_to_CHS:
 
 start endp
 
+        org     02FEh
+        dw      0AA55h
 
 _TEXT   ends
 

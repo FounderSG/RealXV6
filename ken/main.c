@@ -47,6 +47,17 @@ struct cdevsw cdevsw[] = {
  * Icode is the octal bootstrap
  * program executed in user mode
  * to bring up the system.
+ *
+ * Disassembly:
+ * 0100        B8 12 01         MOV AX, 0112h  ; argv
+ * 0103        50               PUSH AX
+ * 0104        B8 0D 01         MOV AX, 010Dh  ; prog
+ * 0107        50               PUSH AX
+ * 0108        BA 0B 00         MOV DX, 000Bh  ; sys_exec
+ * 010B        CD 81            INT 81h        ; syscall exec(prog, argv)
+ * 010D  prog: 69 6E 69 74 00   DB 'init\0'    ; program to exec
+ * 0112  argv: 0D 01            DW av          ; argv[] array
+ * 0114        00 00            DW 0           ; NULL
  */
 char icode[] = {
     0xB8, 0x12, 0x01, 0x50, 0xB8, 0x0D, 0x01, 0x50,

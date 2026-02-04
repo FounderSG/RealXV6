@@ -1,0 +1,67 @@
+boot.com
+4000 100 872
+d--755 0 0
+init    ---755 0 0 ../usr/init.com
+bin     d--755 0 0
+        cat         ---755 0 0 ../usr/cat.com
+        chmod       ---755 0 0 ../usr/chmod.com
+        cp          ---755 0 0 ../usr/cp.com
+        date        ---755 0 0 ../usr/date.com
+        echo        ---755 0 0 ../usr/echo.com
+        fib         ---755 0 0 ../usr/fib.com
+        forktest    ---755 0 0 ../usr/forktest.com
+        grep        ---755 0 0 ../usr/grep.com
+        id          ---755 0 0 ../usr/id.com
+        kill        ---755 0 0 ../usr/kill.com
+        ln          ---755 0 0 ../usr/ln.com
+        login       ---755 0 0 ../usr/login.com
+        ls          ---755 0 0 ../usr/ls.com
+        mkdir       ---755 0 0 ../usr/mkdir.com
+        mkfs        ---755 0 0 ../usr/mkfs.com
+        mknod       ---755 0 0 ../usr/mknod.com
+        more        ---755 0 0 ../usr/more.com
+        mount       ---755 0 0 ../usr/mount.com
+        nice        ---755 0 0 ../usr/nice.com
+        pwd         ---755 0 0 ../usr/pwd.com
+        sh          ---755 0 0 ../usr/sh.com
+        sigtest     ---755 0 0 ../usr/sigtest.com
+        sleep       ---755 0 0 ../usr/sleep.com
+        stty        ---755 0 0 ../usr/stty.com
+        sync        ---755 0 0 ../usr/sync.com
+        umount      ---755 0 0 ../usr/umount.com
+        wc          ---755 0 0 ../usr/wc.com
+        zombie      ---755 0 0 ../usr/zombie.com
+        $
+dev     d--755 0 0
+        console c--666 0 0 0 0
+        rk0     b--644 0 0 0 0
+        rk1     b--644 0 0 0 1
+        rk2     b--644 0 0 0 2
+        rk3     b--644 0 0 0 3
+        $
+etc     d--755 0 0
+$
+usr     d--755 0 0
+        source  d--755 0 0
+        $
+$
+readme.txt ---755 0 0 ../readme.txt
+$
+
+: mkfs proto file format
+: boot sector (currently unused)
+: filsys_blks inode_blks swap_blks
+: root_dir
+: input_lines...
+: $
+:
+: input_line
+:   name modestr uid gid external_path
+: modestr (ex: d--755 or ---666)
+: ---     file
+: b--     block
+: c--     char
+: d--     directory (adds next lines to directory until '$')
+:  u      setuid
+:   g     setgid
+:    666  mode
