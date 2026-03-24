@@ -1,6 +1,6 @@
 PUBLIC  _clock_isr, _trap_isr, _getps, _setps, _save, _use_resume_stack, _do_resume, _memcpy, _memset
 PUBLIC  _bios_getc, _bios_putc, _move_to_user_mode, _ide_isr, _kbd_isr, _uart_isr, _common_isr
-EXTRN   _main: near, _u: near, _resume_SI: near
+EXTRN   _main: near, _u: near
 EXTRN   _isr_savuar: near, _isr_router: near, _clock: near, _check_runrun: near
 EXTRN   _trap0: near, _trap: near, _rkintr: near
 
@@ -195,35 +195,27 @@ _save   endp
 
 _use_resume_stack   proc    near
     cli
-    push ds
-    pop es
-    mov di,offset DGROUP:resume_stack+256
-    mov si, sp
-    mov cx, 16
-    cld
-    rep movsw
-    mov ax, bp
-    sub ax, sp
-    mov sp, offset DGROUP:resume_stack+256
-    add ax, sp
-    mov bp, ax
+    pop ax
+    mov sp, offset DGROUP:resume_stack
+    push ax
     ret
 _use_resume_stack   endp
 
 _do_resume   proc    near
-    mov bx, word ptr _resume_SI
-    mov es, [bx+24]    ; ((struct ctx *)resume_SI)->ss;
-    mov di, [bx+26]
-    sub di, 24         ; ((struct ctx *)resume_SI)->sp - 24;
+    pop     bx              ; discard return address
+    pop     bx              ; bx = ctx
+    mov es, [bx+24]         ; es = ctx->ss
+    mov di, [bx+26]         ; di = ctx->sp
+    sub di, 24
     mov si, bx
     mov cx, 12
     cld
-    rep movsw
+    rep movsw               ; copy saved registers onto target stack
     mov ax, es
     mov ss, ax
     sub di, 24
     mov sp, di
-    pop ds
+    pop ds                  ; restore registers in reverse save() order
     pop es
     pop dx
     pop cx
@@ -320,8 +312,8 @@ _bios_putc  endp
 
 _BSS    SEGMENT word public 'BSS'
 bdata@          label   byte
+    db  128 dup (?)
 resume_stack    label   word
-    db  288 dup (?)
 _BSS   ENDS
 
 _BSSEND         SEGMENT BYTE PUBLIC 'BSSEND'

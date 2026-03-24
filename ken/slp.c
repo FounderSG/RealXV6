@@ -436,20 +436,22 @@ retry:
 
 /* external helper function defined in asm code */
 extern void use_resume_stack(void);
-extern void do_resume(void);
-int resume_SI;
+extern void do_resume(label_t ctx);
+struct proc *resume_proc;
+int *resume_ctx;
 void resume(struct proc *p, label_t ctx)
 {
-    resume_SI = ctx;
+    resume_proc = p;
+    resume_ctx = ctx;
     use_resume_stack();
 
-    if(p != u.u_procp)
+    if(resume_proc != u.u_procp)
     {
         if(u.u_procp->p_stat != SZOMB)
             savu(u.u_procp);
-        retu(p);
+        retu(resume_proc);
     }
-    do_resume();
+    do_resume(resume_ctx);
 }
 
 void estabur(uint addr)
