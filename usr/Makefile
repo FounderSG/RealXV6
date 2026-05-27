@@ -26,12 +26,12 @@ $(CFLAGS) $<
 BINS = init.com sh.com ls.com cat.com wc.com echo.com pwd.com kill.com date.com
 BINS += rm.com login.com cp.com chmod.com mkdir.com sync.com id.com zombie.com
 BINS += mount.com umount.com forktest.com sigtest.com stty.com more.com fib.com
-BINS += ln.com nice.com mknod.com sleep.com grep.com ps.com
+BINS += ln.com nice.com mknod.com sleep.com grep.com ps.com ed.com
 BINS += mkfs.com
 
 all : .symbolic clean unix.lib $(BINS)
 
-OBJS = syscall.obj ulib.obj ctime.obj printf.obj
+OBJS = syscall.obj ulib.obj ctime.obj printf.obj setexit.obj
 
 unix.lib : $(OBJS) startup.obj
 	wlib @<<
