@@ -138,7 +138,7 @@ void psig(void)
         ustack = (int far *)MK_FP(u.u_stack[KSSIZE - 1], u.u_stack[KSSIZE - 2]);
         memcpy(ustack, &ustack[12], 24);
         ctx = (struct ctx far *)ustack;
-        ctx->ip = 0x106;
+        ctx->ip = SIGTRAMP_EXE;
         ctx->si = p;
         ctx = (struct ctx far *)&ustack[12];
         /* ip, cs, flag = ax, flag, return address */
@@ -179,7 +179,7 @@ void psig(void)
 int core(void)
 {
     struct inode *ip;
-    register s;
+    register int ns;
 
     u.u_error = 0;
     u.u_dirp = "core";
@@ -201,49 +201,65 @@ int core(void)
         u.u_count = sizeof(u);
         u.u_segflg = 1;
         writei(ip);
-#if PDP11
-        s = u.u_procp->p_size - USIZE;
-        estabur(0, s, 0, 0);
-        u.u_base = 0;
-        u.u_count = s*64;
+        /*
+         * Dump the user image after the u area.  Unlike V6 (data and stack
+         * contiguous), the EXE window separates them with the unmapped heap
+         * gap, so the two regions are written by two calls; the gap slots are
+         * not-present and a kernel-mode read of one would be a VMM-fatal #PF.
+         */
+        u.u_base = (char *)0;                   /* data pages at DS:0 */
+        u.u_count = u.u_procp->p_dsize * PAGESIZ;
         u.u_segflg = 0;
         writei(ip);
-#endif
+        ns = u.u_procp->p_size - u.u_procp->p_dsize;
+        u.u_base = (char *)(USTACK - ns*PAGESIZ); /* stack pages (high slots) */
+        u.u_count = ns * PAGESIZ;
+        u.u_segflg = 0;
+        writei(ip);
     }
     iput(ip);
     return(u.u_error==0);
 }
 
-#if PDP11
 /*
  * grow the stack to include the SP
  * true return if successful.
+ * sp is the user SP as a data-window offset; sizes are in
+ * pages (the x86 page stands in for the PDP-11 click, so
+ * V6's negative stack addresses become offsets below USTACK
+ * and SINCR is subsumed by the page rounding).  The stack
+ * page count is p_size - p_dsize; expand updates p_size, so
+ * V6's u_ssize bookkeeping has no counterpart here.
  */
-
-grow(sp)
-char *sp;
+int grow(unsigned sp)
 {
-    register a, si, i;
+    register uint a;
+    register int si, i;
+    register struct proc *p;
+    int nd, ns;
 
-    if(sp >= -u.u_ssize*64)
+    p = u.u_procp;
+    nd = p->p_dsize;
+    ns = p->p_size - nd;
+    if(sp >= (unsigned)USTACK - (unsigned)ns*PAGESIZ)
         return(0);
-    si = ldiv(-sp, 64) - u.u_ssize + SINCR;
+    si = USTACK/PAGESIZ - (int)(sp/PAGESIZ) - ns;
     if(si <= 0)
         return(0);
-    if(estabur(u.u_tsize, u.u_dsize, u.u_ssize+si, u.u_sep))
+    if(estabur(p->p_tsize, nd, ns+si, 1))
         return(0);
-    expand(u.u_procp->p_size+si);
-    a = u.u_procp->p_addr + u.u_procp->p_size;
-    for(i=u.u_ssize; i; i--) {
+    expand(p->p_size+si);
+    a = p->p_addr + p->p_size;
+    for(i=ns; i; i--) {
         a--;
         copyseg(a-si, a);
     }
     for(i=si; i; i--)
         clearseg(--a);
-    u.u_ssize =+ si;
     return(1);
 }
 
+#if PDP11
 /*
  * sys-trace system call.
  */

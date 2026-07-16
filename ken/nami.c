@@ -186,5 +186,10 @@ int schar(void)
  */
 int uchar(void)
 {
-    return fubyte((int)u.u_dirp++);
+    register int c;
+
+    c = fubyte((int)u.u_dirp++);
+    if(c == -1)
+        u.u_error = EFAULT;
+    return(c);
 }

@@ -121,8 +121,10 @@ int bmap(struct inode *ip, int bn)
  */
 int passc(char c)
 {
-    if(u.u_segflg)
+    if(u.u_segflg == 1)
         *u.u_base = c; else
+    if(u.u_segflg == 2)
+        suibyte((int)u.u_base, c); else
         if(subyte((int)u.u_base, c) < 0) {
             u.u_error = EFAULT;
             return(-1);
@@ -143,14 +145,19 @@ int passc(char c)
  */
 int cpass(void)
 {
-    register char c;
-    
+    register int c;
+
     if(u.u_count == 0)
         return(-1);
-    if(u.u_segflg)
-        c = *u.u_base; 
+    if(u.u_segflg == 1)
+        c = *u.u_base;
+    else if(u.u_segflg == 2)
+        c = fuibyte((int)u.u_base);
     else
-        c = fubyte((int)u.u_base);
+        if((c=fubyte((int)u.u_base)) < 0) {
+            u.u_error = EFAULT;
+            return(-1);
+        }
     u.u_count--;
     if(++u.u_offset[1] == 0)
         u.u_offset[0]++;

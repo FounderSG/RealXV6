@@ -45,11 +45,19 @@ struct user
     int u_cstime[2];        /* sum of childs' stimes */
     int u_ar0[4];           /* users saved register R0 - R3 */
     char u_intflg;          /* catch intr from sys */
-    char padding[57];
-    int u_stack[KSSIZE];    /* kernel mode stack */
+    char padding[27];
+    int u_stack[KSSIZE];    /* kernel mode stack (grew to keep sizeof==0x400
+                             * after the u_fault save area was removed) */
 };
 
-extern struct user u;       /* current u struct */
+/* The u-area of the current process is a VMM paging WINDOW at a fixed near
+ * aperture (offset UADDR=0xD000 = linear page 0x1D in the kernel segment), not
+ * a linker-placed global.  The VMM remaps that page to the running process's
+ * core page 15 on each context switch (retu -> set_user_map(2, p_addr+15)); no
+ * bytes are copied.  sizeof(struct user) == 0x400 (occupies 0xD000..0xD3FF);
+ * STARTX maps the window to proc[0]'s u page, then zeroes it, at boot. */
+#define UADDR 0xD000
+#define u (*(struct user *)UADDR)
 
 /* u_error codes */
 #define EFAULT  106

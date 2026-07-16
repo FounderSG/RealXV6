@@ -1,10 +1,15 @@
 PUBLIC  _clock_isr, _trap_isr, _getps, _setps, _save, _use_resume_stack, _do_resume, _memcpy, _memset
 PUBLIC  _bios_getc, _bios_putc, _move_to_user_mode, _ide_isr, _kbd_isr, _uart_isr, _common_isr
-EXTRN   _main: near, _u: near
+PUBLIC  _segflt_isr
+EXTRN   _main: near
 EXTRN   _isr_savuar: near, _isr_router: near, _clock: near, _check_runrun: near
 EXTRN   _trap0: near, _trap: near, _rkintr: near
+EXTRN   _segflt: near
 
 DGROUP  GROUP _TEXT,_DATA,_BSS,_BSSEND
+
+; Fixed near aperture for the current process's u-area (see h/user.h).
+U_AREA  EQU   0D000h
 
     .MODEL  TINY
     .CODE
@@ -13,7 +18,30 @@ STARTX          PROC    NEAR
     mov     ax, cs
     mov     ds, ax
     mov     es, ax
-    mov     ax, offset DGROUP:_u
+
+; Map WIN_U (PT0[0x1D] @ linear 0xD000) to proc[0]'s u-area page BEFORE SP
+; moves into the window.  proc[0].p_addr = core_cs/256 = 0x10, so its u-area
+; (core page 15) = 0x10+15 = 0x1F.  Build a sureg_desc on the current stack
+; (SS=CS=0x1000, SP=0xFFFE) and call HVC_SUREG; int 80h does not push to the
+; guest stack, so this is safe.
+    sub     sp, 14          ; allocate sureg_desc (7 words) on the entry stack
+    mov     bp, sp
+    xor     ax, ax
+    mov     [bp+0], ax      ; taddr = 0
+    mov     [bp+2], ax      ; tsize = 0
+    mov     [bp+4], ax      ; daddr = 0
+    mov     [bp+6], ax      ; dsize = 0
+    mov     [bp+8], ax      ; ssize = 0
+    mov     ax, 001Fh
+    mov     [bp+10], ax     ; uaddr = 0x1F (proc[0] u-area physical page)
+    xor     ax, ax
+    mov     [bp+12], ax     ; mode = 0 (single-seg: WIN_U only)
+    mov     bx, bp          ; near ptr to descriptor (DS=0x1000)
+    mov     ah, 06h         ; HVC_SUREG
+    int     80h
+    add     sp, 14          ; restore entry stack
+
+    mov     ax, U_AREA
     add     ax, 1020
     mov     sp, ax
 
@@ -23,6 +51,13 @@ STARTX          PROC    NEAR
     mov     cx, offset DGROUP: edata@
     sub     cx, di
     cld
+    rep     stosb
+
+; Zero the relocated u-area: it left BSS, so the clear above misses it.
+; Nothing is pushed yet and rep stosb does not touch the stack.
+    xor     ax, ax
+    mov     di, U_AREA
+    mov     cx, 0400h
     rep     stosb
 
 ; Call main function
@@ -62,7 +97,7 @@ SwitchToKernelStack MACRO
     mov dx, ss
     mov ax, cs
     mov ss, ax
-    mov ax, offset DGROUP:_u
+    mov ax, U_AREA
     add ax, 1024
     mov sp, ax
     push dx
@@ -227,6 +262,7 @@ _do_resume   proc    near
     iret
 _do_resume   endp
 
+
 _move_to_user_mode proc    near
     mov bp, sp
     mov dx, [bp+2]
@@ -309,6 +345,31 @@ _bios_putc  proc    near
     pop bp
     ret
 _bios_putc  endp
+
+; VMM redirect target for a user #PF (stack growth or segmentation violation).
+; Entered via VMM iretd on the KERNEL stack (the user SP may be inside the
+; not-present stack gap, so it cannot be used).  SS = GUEST_CS, DS/ES and the
+; GP registers hold the faulting user state, IF=0, VM=1.  The VMM pushed, at
+; the top of the u-area kernel stack (growing down from 0xD400):
+;   0xD3F4 ip  0xD3F6 cs  0xD3F8 flags   (user iret frame; SP enters here)
+;   0xD3FA fault_off  0xD3FC user_sp  0xD3FE user_ss
+; EnterISR completes a struct ctx below the iret frame; segflt() grows the
+; stack (restart) or posts SIGSEG, leaving the return SS:SP in
+; u_stack[KSSIZE-1:-2] and a ctx to IRET through on the user stack.
+_segflt_isr     proc    near
+    EnterISR                        ; push bp,si,di,ax,bx,cx,dx,es,ds; ds=cs
+    mov     bp, sp                  ; bp -> ctx (ds@0..bp@16, ip@18,cs@20,flag@22,
+                                    ;            fault_off@24, user_sp@26, user_ss@28)
+    push    bp                      ; kctx (near ptr to the ctx)
+    push    word ptr [bp+28]        ; user_ss
+    push    word ptr [bp+26]        ; user_sp
+    push    word ptr [bp+24]        ; fault_off
+    call    near ptr _segflt        ; segflt(fault_off, user_sp, user_ss, kctx)
+    ; segflt set u_stack[KSSIZE-1:-2] = return ss:sp; IRET back through it.
+    mov     sp, U_AREA + 1024 - 4   ; -> u_stack[KSSIZE-2] slot (0xD3FC)
+    SwitchToUserStack               ; ss:sp = u_stack[KSSIZE-1:-2]
+    ExitISR                         ; pop ctx regs; iret to user
+_segflt_isr     endp
 
 _BSS    SEGMENT word public 'BSS'
 bdata@          label   byte

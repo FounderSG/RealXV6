@@ -241,19 +241,67 @@ profil()
 #endif
 
 /*
- * Get Kernel Address
- * id 0: proc array
- * id 1: swapdev
+ * psinfo - process status query (replaces the old getkaddr peek).
+ *
+ * Copy proc[index] out to the user buffer, followed by a 512-byte image of the
+ * top of that process's user stack ([USTACK-512, USTACK)), where exec leaves the
+ * argument vector.  ps assembles the COMMAND column from that image, so it never
+ * reads /dev/mem or /dev/kmem and never needs to know the physical layout: the
+ * kernel, which owns the mapping, resolves it here.  This is also what lets the
+ * data segment be mapped sparsely -- ps no longer assumes a flat p_addr image.
+ *
+ * The stack image is only meaningful for separated-I&D (EXE) processes; single-
+ * segment images (icode, proc 0/1) carry p_tsize==0 and get only the struct.
+ *
+ * In core the copy is a non-blocking far memcpy, so it cannot race the swapper.
+ * For a swapped-out process the stack block is read from the swap device, which
+ * sleeps; the process may be swapped back in (or the slot reused) while we sleep,
+ * leaving the block stale.  Snapshot {p_pid,p_addr,SLOAD} across the bread and
+ * retry if it moved -- on the retry it is in core and the read is race-free.
  */
-void getkaddr(void)
+void psinfo(void)
 {
-    int id;
+    struct proc *p;
+    struct buf *bp;
+    int idx, oaddr, opid, osize;
+    uint udst, sdst;
 
-    id = u.u_ar0[R0];
-    if (id == 0)
-        u.u_ar0[R0] = (int)proc;
-    else if (id == 1)
-        u.u_ar0[R0] = (int)&swapdev;
-    else
-        u.u_ar0[R0] = 0;
+    idx = u.u_ar0[R0];
+    udst = (uint)u.u_arg[0];
+    if(idx < 0 || idx >= NPROC) {
+        u.u_error = EINVAL;
+        return;
+    }
+    p = &proc[idx];
+    copyout((uint)p, udst, sizeof(struct proc));
+    u.u_ar0[R0] = p->p_stat;
+    if(p->p_stat == 0 || p->p_tsize == 0)
+        return;                         /* no EXE argument frame */
+    sdst = udst + sizeof(struct proc);
+
+loop:
+    oaddr = p->p_addr;
+    osize = p->p_size;
+    opid  = p->p_pid;
+    /*
+     * The user stack sits at the tail of the (possibly sparse) data block, so
+     * the top page [USTACK-512, USTACK) is the block's last physical page,
+     * p_addr + p_size - 1, at page offset (USTACK-512) & (PAGESIZ-1) = 0xE00.
+     * This reaches any process (current or not) via the identity map, since
+     * core blocks are allocated at physical pages >= USPACE, outside the windows.
+     */
+    if(p->p_flag & SLOAD) {
+        /* in core: identity-mapped, no sleep, so it cannot race the swapper */
+        memcpy(MK_FP((unsigned)u.u_procp->p_addr*(PAGESIZ/16), sdst),
+               MK_FP((unsigned)(oaddr+osize-1)*(PAGESIZ/16), (USTACK-512)&(PAGESIZ-1)),
+               512);
+    } else {
+        bp = bread(swapdev, oaddr + (osize-1)*(PAGESIZ/512) + (((USTACK-512)&(PAGESIZ-1))>>9));
+        if(p->p_pid != opid || (p->p_flag&SLOAD) || p->p_addr != oaddr) {
+            brelse(bp);                 /* swapped in while we slept; reread */
+            goto loop;
+        }
+        copyout((uint)bp->b_addr, sdst, 512);
+        brelse(bp);
+    }
 }

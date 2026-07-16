@@ -36,7 +36,7 @@
 #define SYS_sync       36
 #define SYS_kill       37
 #define SYS_switch     38
-#define SYS_getkaddr   39
+#define SYS_psinfo     39
 
 #define SYS_dup        41
 #define SYS_pipe       42
@@ -153,6 +153,28 @@ int chown(char *filename, int uid, int gid)
     return r3;
 }
 
+extern char end[];      /* linker symbol: end of BSS = initial program break */
+
+int brk(char *addr)
+{
+    syscall(SYS_break, -1, addr);
+    return r3;
+}
+
+char *sbrk(int incr)
+{
+    static char *cur = 0;
+    char *old;
+
+    if(cur == 0)
+        cur = end;          /* first call: the break starts at end of BSS */
+    old = cur;
+    if(brk(cur + incr) != 0)
+        return (char *)-1;
+    cur += incr;
+    return old;
+}
+
 int stat(char *filename, void *buf)
 {
     syscall(SYS_stat, -1, filename, buf);
@@ -234,9 +256,9 @@ int kill(int pid, int signalNo)
     return r3;
 }
 
-int getkaddr(int id)
+int psinfo(int index, void *buf)
 {
-    return syscall(SYS_getkaddr, id);
+    return syscall(SYS_psinfo, index, buf);
 }
 
 int dup(int fd)

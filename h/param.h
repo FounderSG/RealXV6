@@ -61,9 +61,15 @@
 
 #define USIZE   16      /* page count of user block */
 #define PAGESIZ 4096    /* page size */
-#define USPACE  0x20    /* start of user space page */
+#define USPACE  0x20    /* start of user space page (windows live in the adapter holes above 640K) */
+#define WINSEG  0xA000  /* EXE code-window selector (VMM WIN_TEXT @ linear 0xA0000, VGA-graphics hole) */
+#define WDSEG   0xD000  /* EXE data-window selector (VMM WIN_DATA @ linear 0xD0000, option-ROM hole;
+                         * unrelated to the kernel's u window at DS:0xD000 = linear 0x1D000) */
 #define USTACK  0xF000  /* top of user stack */
-#define KSSIZE  365     /* size of kernel stack 365 words */
+#define KSSIZE  380     /* size of kernel stack in words (grew by 15 when the
+                         * VMM u_fault save area was removed in stage 5; keeps
+                         * sizeof(struct user) == 0x400 so the kernel stack top
+                         * stays at U_AREA+1024 = 0xD400) */
 #define NULL    0
 #define NODEV   (-1)
 #define ROOTINO 1       /* i number of all roots */

@@ -9,5 +9,6 @@
 #include "file.h"
 #include "user.h"
 #include "proc.h"
+#include "exec.h"
 #include "tty.h"
 #include "systm.h"

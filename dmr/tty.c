@@ -449,17 +449,25 @@ int ttrstrt(int atp)
 void ttstart(struct tty *atp)
 {
     register struct klreg *addr;
-    int c;
+    int c, s;
     register struct tty *tp;
 
     tp = atp;
     addr = tp->t_addr;
-    if (tp->t_state&SSTART) {
-        /* (*addr.func)(tp); */
-        return;
-    }
+    /*
+     * Block the UART transmit interrupt across the DONE test, the getc and the
+     * THR write.  ttstart runs both from the top half (ttwrite's final call, at
+     * spl0) and from the tx interrupt; without this a tx interrupt landing
+     * between the DONE check and uart_putc double-pulls t_outq and overwrites
+     * the THR (FIFO off), losing a character -- the intermittent console drop,
+     * easy to hit under the VMM where the emulated UART finishes a byte at once.
+     */
+    s = getps();
+    spl5();
+    if (tp->t_state&SSTART)
+        goto out;                       /* (*addr.func)(tp); */
     if ((addr->tttcsr&DONE)==0 || tp->t_state&TIMEOUT)
-        return;
+        goto out;
     if ((c=getc(&tp->t_outq)) >= 0) {
         if (c<=0177) {
           #ifdef KL_BACKEND_UART
@@ -475,6 +483,8 @@ void ttstart(struct tty *atp)
             tp->t_state |= TIMEOUT;
         }
     }
+out:
+    setps(s);
 }
 
 /*

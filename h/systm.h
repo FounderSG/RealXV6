@@ -49,6 +49,7 @@ extern int  rootdev;    /* dev of root see conf.c */
 extern int  swapdev;    /* dev of swap see conf.c */
 extern int  swplo;      /* block number of swap space */
 extern int  nswap;      /* size of swap space */
+extern int  maxmem;     /* actual max memory per process (pages) */
 extern int  updlock;    /* lock for sync */
 extern int  rablock;    /* block to be read ahead */
 
@@ -64,6 +65,7 @@ extern struct sysent sysent[64];
 
 extern int core_cs;     /* kernel code segment, reg CS */
 extern int core_spl;    /* system priority level */
+extern int user_dseg;   /* D-space segment for current proc: WDSEG (EXE) or p_addr*256 */
 
 /* trap.c */
 void nosys(void);
@@ -197,7 +199,7 @@ void chown(void);
 void ssig(void);
 void kill(void);
 void times(void);
-void getkaddr(void);
+void psinfo(void);
 
 /* slp.c */
 void swtch(void);
@@ -208,8 +210,26 @@ void wakeup(void *chan);
 void sleep(void *chan, int pri);
 int save(label_t ctx);
 void resume(struct proc *p, label_t ctx);
-void estabur(uint addr);
 int newproc(void);
+uint swgrow(int need);
+void expand(int newsize);
+
+/* main.c */
+int estabur(int nt, int nd, int ns, int sep);
+
+/* VMM hypercall: load user segment windows from a sureg_desc. */
+struct sureg_desc {
+    int taddr, tsize;   /* WIN_TEXT: first page, count */
+    int daddr, dsize;   /* WIN_DATA: first page, data page count */
+    int ssize;          /* WIN_DATA: stack page count (high slots) */
+    int uaddr;          /* WIN_U: physical page */
+    int mode;           /* 0=single-seg (WIN_U only), 1=EXE (all three windows) */
+};
+void sureg(struct proc *p);             /* build sureg_desc from proc; WIN_TEXT/DATA/U via HVC_SUREG */
+void segflt_setup(void);               /* register _segflt_isr address with VMM (call once at boot) */
+void segflt(unsigned fa, unsigned usp, unsigned uss, unsigned kctx);
+                                       /* trap.c: VMM #PF handler, entered on the kernel stack from
+                                        * _segflt_isr; grow() and restart, or psignal(SIGSEG) */
 
 /* sig.c */
 void signal(struct tty *tp, int sig);
@@ -217,6 +237,7 @@ void psignal(struct proc *p, int sig);
 int issig(void);
 void psig(void);
 int core(void);
+int grow(unsigned sp);
 
 /* malloc.c */
 uint malloc(void *mp, uint size);
@@ -225,6 +246,7 @@ void coremap_init(void);
 
 /* text.c */
 void xswap(struct proc *p, int ff, uint a);
+void xalloc(struct inode *ip, int tsize);
 void xfree(void);
 void xccdec(struct text *xp);
 
@@ -285,10 +307,12 @@ void spl1(void);
 void spl5(void);
 void spl6(void);
 void spl7(void);
-char fubyte(int addr);
+int fubyte(int addr);
 int fuword(int addr);
 int subyte(int addr, char ch);
 int suword(int addr, int value);
+int fuibyte(int addr);
+int suibyte(int addr, char ch);
 void copyseg(uint src, uint dst);
 void clearseg(uint dst);
 void copyout(uint srcAddr, uint dstAddr, int iSize);

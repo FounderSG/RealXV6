@@ -1,38 +1,38 @@
 boot.com
 4000 100 872
 d--755 0 0
-init    ---755 0 0 ../usr/init.com
+init    ---755 0 0 ../usr/init.aout
 bin     d--755 0 0
-        cat         ---755 0 0 ../usr/cat.com
-        chmod       ---755 0 0 ../usr/chmod.com
-        cp          ---755 0 0 ../usr/cp.com
-        date        ---755 0 0 ../usr/date.com
-        echo        ---755 0 0 ../usr/echo.com
-        ed          ---755 0 0 ../usr/ed.com
-        fib         ---755 0 0 ../usr/fib.com
-        forktest    ---755 0 0 ../usr/forktest.com
-        grep        ---755 0 0 ../usr/grep.com
-        id          ---755 0 0 ../usr/id.com
-        kill        ---755 0 0 ../usr/kill.com
-        ln          ---755 0 0 ../usr/ln.com
-        login       ---755 0 0 ../usr/login.com
-        ls          ---755 0 0 ../usr/ls.com
-        mkdir       ---755 0 0 ../usr/mkdir.com
-        mkfs        ---755 0 0 ../usr/mkfs.com
-        mknod       ---755 0 0 ../usr/mknod.com
-        more        ---755 0 0 ../usr/more.com
-        mount       ---755 0 0 ../usr/mount.com
-        nice        ---755 0 0 ../usr/nice.com
-        ps          ---755 0 0 ../usr/ps.com
-        pwd         ---755 0 0 ../usr/pwd.com
-        sh          ---755 0 0 ../usr/sh.com
-        sigtest     ---755 0 0 ../usr/sigtest.com
-        sleep       ---755 0 0 ../usr/sleep.com
-        stty        ---755 0 0 ../usr/stty.com
-        sync        ---755 0 0 ../usr/sync.com
-        umount      ---755 0 0 ../usr/umount.com
-        wc          ---755 0 0 ../usr/wc.com
-        zombie      ---755 0 0 ../usr/zombie.com
+        cat         ---755 0 0 ../usr/cat.aout
+        chmod       ---755 0 0 ../usr/chmod.aout
+        cp          ---755 0 0 ../usr/cp.aout
+        date        ---755 0 0 ../usr/date.aout
+        echo        ---755 0 0 ../usr/echo.aout
+        ed          ---755 0 0 ../usr/ed.aout
+        fib         ---755 0 0 ../usr/fib.aout
+        forktest    ---755 0 0 ../usr/forktest.aout
+        grep        ---755 0 0 ../usr/grep.aout
+        id          ---755 0 0 ../usr/id.aout
+        kill        ---755 0 0 ../usr/kill.aout
+        ln          ---755 0 0 ../usr/ln.aout
+        login       ---755 0 0 ../usr/login.aout
+        ls          ---755 0 0 ../usr/ls.aout
+        mkdir       ---755 0 0 ../usr/mkdir.aout
+        mkfs        ---755 0 0 ../usr/mkfs.aout
+        mknod       ---755 0 0 ../usr/mknod.aout
+        more        ---755 0 0 ../usr/more.aout
+        mount       ---755 0 0 ../usr/mount.aout
+        nice        ---755 0 0 ../usr/nice.aout
+        ps          ---755 0 0 ../usr/ps.aout
+        pwd         ---755 0 0 ../usr/pwd.aout
+        sh          ---755 0 0 ../usr/sh.aout
+        sigtest     ---755 0 0 ../usr/sigtest.aout
+        sleep       ---755 0 0 ../usr/sleep.aout
+        stty        ---755 0 0 ../usr/stty.aout
+        sync        ---755 0 0 ../usr/sync.aout
+        umount      ---755 0 0 ../usr/umount.aout
+        wc          ---755 0 0 ../usr/wc.aout
+        zombie      ---755 0 0 ../usr/zombie.aout
         $
 dev     d--755 0 0
         console c--666 0 0 0 0

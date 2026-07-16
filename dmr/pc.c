@@ -1,13 +1,79 @@
 #include "os.h"
 
+/*
+ * The u-area is a VMM paging window (PT0[0x1D] @ near 0xD000): while a process
+ * runs, the window maps its own core page 15, so every write to u lands
+ * directly in that page.  savu therefore has nothing to copy; retu just remaps
+ * the window to the incoming process's u-area page (core page 15 = p_addr+15).
+ */
 void savu(struct proc *p)
 {
-    memcpy(MK_FP(p->p_addr*(PAGESIZ/16), USTACK), &u, sizeof(u));
+}
+
+/*
+ * Segment base the kernel uses to reach the *current* process's D-space (see the
+ * user_space_io_pointer macro / copyout below).  For an EXE process this is the
+ * WIN_DATA window selector, so kernel access follows the same (possibly sparse)
+ * mapping the process itself uses; for a single-seg process it is the flat
+ * physical segment.  Set by sureg (called from retu and exec).
+ */
+int user_dseg = 0;
+
+/* HVC_SEGFLT_SETUP (0x07): BX = near IP of _segflt_isr in kernel code segment.
+ * The VMM records it and vectors a user #PF there, on the kernel stack. */
+extern void segflt_isr(void);   /* PUBLIC in dmr/m86.asm */
+static void hvc_segflt_setup(int ip);
+#pragma aux hvc_segflt_setup =  \
+    "mov ah, 07h"               \
+    "int 80h"                   \
+    parm [bx]                   \
+    modify [ax];
+
+void segflt_setup(void)
+{
+    hvc_segflt_setup((int)segflt_isr);
+}
+
+/* HVC_SUREG: BX = near ptr to sureg_desc (passed via parm [bx] pragma). */
+static void hvc_sureg(struct sureg_desc *desc);
+#pragma aux hvc_sureg =     \
+    "mov ah, 06h"           \
+    "int 80h"               \
+    parm [bx]               \
+    modify [ax bx];
+
+void sureg(struct proc *p)
+{
+    static struct sureg_desc desc;  /* static: fixed near addr, no frame-ptr needed */
+
+    if(p->p_tsize) {
+        /* V6 sureg takes the text base from the text entry: after a swap-in
+         * reload x_caddr moves and per-proc copies go stale.  p_taddr stays
+         * as exec's I-space load cursor. */
+        desc.taddr = p->p_textp != NULL ? p->p_textp->x_caddr : p->p_taddr;
+        desc.tsize = p->p_tsize;
+        desc.daddr = p->p_addr;
+        desc.dsize = p->p_dsize;
+        desc.ssize = p->p_size - p->p_dsize;
+        desc.uaddr = p->p_uaddr;
+        desc.mode  = 1;
+        user_dseg  = WDSEG;
+    } else {
+        desc.taddr = 0;
+        desc.tsize = 0;
+        desc.daddr = 0;
+        desc.dsize = 0;
+        desc.ssize = 0;
+        desc.uaddr = p->p_addr + (USIZE-1);
+        desc.mode  = 0;
+        user_dseg  = p->p_addr * (PAGESIZ/16);
+    }
+    hvc_sureg(&desc);
 }
 
 void retu(struct proc *p)
 {
-    memcpy(&u, MK_FP(p->p_addr*(PAGESIZ/16), USTACK), sizeof(u));
+    sureg(p);
 }
 
 void spl0(void)
@@ -40,11 +106,11 @@ void spl7(void)
     disable();
 }
 
-#define user_space_io_pointer MK_FP(u.u_procp->p_addr*(PAGESIZ/16), addr)
+#define user_space_io_pointer MK_FP(user_dseg, addr)
 
-char fubyte(int addr)
+int fubyte(int addr)
 {
-    return *(char far *)user_space_io_pointer;
+    return *(char far *)user_space_io_pointer & 0377;
 }
 
 int fuword(int addr)
@@ -64,6 +130,25 @@ int suword(int addr, int value)
     return 0;
 }
 
+/*
+ * I-space (code segment) byte access, used by xalloc to load the code segment
+ * of a separated I&D program.  The shared text block is at physical p_taddr
+ * (identity mapped); the running process reaches the same pages through
+ * WIN_TEXT.
+ */
+#define user_ispace_io_pointer MK_FP(u.u_procp->p_taddr*(PAGESIZ/16), addr)
+
+int fuibyte(int addr)
+{
+    return *(char far *)user_ispace_io_pointer & 0377;
+}
+
+int suibyte(int addr, char ch)
+{
+    *(char far *)user_ispace_io_pointer = ch;
+    return 0;
+}
+
 #define PAGE_ADDR(page) MK_FP(page*(PAGESIZ/16), 0)
 
 void copyseg(uint src, uint dst)
@@ -78,7 +163,7 @@ void clearseg(uint dst)
 
 void copyout(uint srcAddr, uint dstAddr, int iSize)
 {
-    memcpy(MK_FP(u.u_procp->p_addr*(PAGESIZ/16), dstAddr), MK_FP(core_cs, srcAddr), iSize);
+    memcpy(MK_FP(user_dseg, dstAddr), MK_FP(core_cs, srcAddr), iSize);
 }
 
 typedef union {

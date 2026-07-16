@@ -1,6 +1,5 @@
 #include "os.h"
 
-struct user u;
 struct proc proc[NPROC];
 struct inode *rootdir;
 
@@ -16,6 +15,7 @@ int rootdev = 0;
 int swapdev = 0;
 int swplo = 4000;
 int nswap = 872;
+int maxmem;
 int updlock = 0;
 
 int execnt;
@@ -26,6 +26,7 @@ int nchrdev;
 
 struct mount mount[NMOUNT];
 struct inode inode[NINODE];
+struct text text[NTEXT];
 char canonb[CANBSIZ];
 int coremap[CMAPSIZ];
 int swapmap[SMAPSIZ];
@@ -69,8 +70,10 @@ char icode[] = {
 void main()
 {
     pc_init();
+    segflt_setup();
 
-    mfree(coremap, 128, USPACE);
+    maxmem = 128;
+    mfree(coremap, maxmem, USPACE);
     mfree(swapmap, nswap, swplo);
 
     /*
@@ -109,4 +112,32 @@ void main()
         return;
     }
     sched();
+}
+
+/*
+ * Try out the 3 pseudo text,data,stack segment
+ * sizes passed as arguments for possible exceed
+ * of max sizes, then load the user segmentation.
+ * The argument sep specifies if the text and
+ * data+stack segments are to be separated (EXE).
+ * Sizes are in pages: x86 paging stands in for
+ * the PDP-11 APRs, so where V6 builds the
+ * u_uisa/u_uisd prototypes here, this port keeps
+ * the equivalent state in the proc entry and
+ * sureg rebuilds the windows from it.  The +1 is
+ * the EXE u-page (V6's USIZE analog).
+ */
+int estabur(int nt, int nd, int ns, int sep)
+{
+    if(sep)
+        if(nd+ns > USTACK/PAGESIZ)
+            goto err;
+    if(nt+nd+ns+1 > maxmem)
+        goto err;
+    sureg(u.u_procp);
+    return(0);
+
+err:
+    u.u_error = ENOMEM;
+    return(-1);
 }

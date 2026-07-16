@@ -4,10 +4,11 @@
 ; V6-style non-local goto: setexit()/reset(), the pre-setjmp mechanism
 ; used by ed.  setexit() records the current call frame and returns
 ; normally; a later reset() unwinds the stack back to that point, as if
-; setexit() had returned a second time.  Tiny model (.COM): CS=DS=SS, so
-; saving SP/BP and the return offset is enough.
+; setexit() had returned a second time.  The code is position independent
+; (near jmps, DS-relative data), so it works in the separated I&D (EXE)
+; layout too.
 
-DGROUP  group   _TEXT,_DATA
+DGROUP  group   _DATA
 
 _DATA   segment word public 'DATA'
 sav_ip  dw      0

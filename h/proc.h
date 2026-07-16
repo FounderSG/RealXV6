@@ -19,10 +19,14 @@ struct  proc
     int     p_ttyp;     /* controlling tty */
     int     p_pid;      /* unique process id */
     int     p_ppid;     /* process id of parent */
-    int     p_addr;     /* address of swappable image */
+    int     p_addr;     /* address of swappable image (data block for EXE) */
     int     p_size;     /* size of swappable image (*64 bytes) */
+    int     p_taddr;    /* EXE code segment base page; 0 = single-segment */
+    int     p_tsize;    /* EXE code segment size in pages; 0 = single-segment */
+    int     p_uaddr;    /* EXE u-area own page; single-seg uses p_addr+USIZE-1 */
+    int     p_dsize;    /* EXE data+bss page count; stack pages = p_size - p_dsize */
     int     p_wchan;    /* event process is awaiting */
-    void    *p_textp;   /* pointer to text structure */
+    struct text *p_textp;   /* pointer to text structure */
 };
 extern struct proc proc[NPROC];
 

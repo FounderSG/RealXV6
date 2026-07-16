@@ -7,36 +7,40 @@
 CC = wcc
 CFLAGS = -wcd=107 -wcd=131 -ms -0 -s -ze -zls -ecc -zp1 -bt=dos -ohs -zq -j -zl -fo=.obj
 LD = wlink
-LDFLAGS = SYSTEM dos com FILE startup.obj LIBRARY unix OPTION map,nodefaultlibs
+LDFLAGS = SYSTEM dos FILE startup.obj LIBRARY unix OPTION map,nodefaultlibs
+PYTHON = python
 
 .EXTENSIONS:
-.EXTENSIONS: .com .obj .asm .c
+.EXTENSIONS: .aout .obj .asm .c
 
-.obj.com:
+# Link as an MZ .exe, then convert to a.out.
+.obj.aout:
 	$(LD) @<<
-$(LDFLAGS) FILE $< NAME $@
+$(LDFLAGS) FILE $< NAME $*.exe
 <<
+	$(PYTHON) ../tools/exe2aout.py $*.exe $*.map $@
 .c.obj:
 	$(CC) @<<
 $(CFLAGS) $<
 <<
+# Small model (-ms), not tiny (-mt): keep _TEXT out of DGROUP.
 .asm.obj:
-	wasm -bt=DOS -mt -0 $< -fo=$@
+	wasm -bt=DOS -ms -0 $< -fo=$@
 
-BINS = init.com sh.com ls.com cat.com wc.com echo.com pwd.com kill.com date.com
-BINS += rm.com login.com cp.com chmod.com mkdir.com sync.com id.com zombie.com
-BINS += mount.com umount.com forktest.com sigtest.com stty.com more.com fib.com
-BINS += ln.com nice.com mknod.com sleep.com grep.com ps.com ed.com
-BINS += mkfs.com
+BINS = init.aout sh.aout ls.aout cat.aout wc.aout echo.aout pwd.aout kill.aout date.aout
+BINS += rm.aout login.aout cp.aout chmod.aout mkdir.aout sync.aout id.aout zombie.aout
+BINS += mount.aout umount.aout forktest.aout sigtest.aout stty.aout more.aout fib.aout
+BINS += ln.aout nice.aout mknod.aout sleep.aout grep.aout ps.aout ed.aout
+BINS += mkfs.aout
 
-all : .symbolic clean unix.lib $(BINS)
+all : .symbolic clean unix.lib startup.obj $(BINS)
 
 OBJS = syscall.obj ulib.obj ctime.obj printf.obj setexit.obj
 
-unix.lib : $(OBJS) startup.obj
+unix.lib : $(OBJS)
 	wlib @<<
 -q -fo unix.lib $(OBJS)
 <<
 
 clean : .symbolic
-	rm -f *.obj *.err *.com *.lib *.map
+	rm -f *.obj *.err *.com *.lib *.map *.exe *.aout

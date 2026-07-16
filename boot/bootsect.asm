@@ -12,40 +12,45 @@ _TEXT   segment word public 'CODE'
 
 start proc near
 
-        mov ax, 800h            ; Set SP below 0x10000
-        mov sp, ax
+        xor ax, ax              ; ss = 0: do not inherit the BIOS stack segment
+        mov ss, ax
+        mov sp, 800h            ; scratch stack while loading (phys 0x0800)
 
-        mov ax, 1000h           ; Load segment for 64K at 0x10000
-        mov es, ax              ; ES = 0x1000
-        mov bx, 100h            ; Set BX (offset) to 0x100
+        ; --- Phase 1: load vmm.bin (sectors 1..32) at 0x0800:0x0000 -----------
+        mov ax, 800h
+        mov es, ax
+        xor bx, bx
+        mov si, 1
 
-        ; Read 128 blocks (sectors) starting from block 1
-        mov si, 1               ; Block number 1 (we'll loop from 1 to 128)
+read_vmm:
+        call read_block
+        jc read_failed
+        add bx, 512
+        inc si
+        cmp si, 97              ; sectors 1..96 (vmm.bin 1..32 + unix.com 33..96)
+        jb read_vmm
 
-read_loop:
-        call read_block         ; Call the function to read block in SI
-        jc read_failed          ; Jump if carry flag is set (error occurred)
-
-        add bx, 512             ; Advance offset by 512 (size of 1 sector)
-        inc si                  ; Next block number
-        cmp si, 120             ; Have we read 128 sectors?
-        jb read_loop            ; If not, keep reading
-
-        ; Jump to the loaded code at 0x1000:0x0100
-        mov sp, 0FFFEh          ; Set kernel stack SP
-        mov ax, es              ; Load kernel segment
-        mov ss, ax              ; set kernel stack SS
-        push ax                 ; push CS
-        mov ax, 0100h
-        push ax                 ; push IP
-        retf                    ; far jump to kernel entry
+        ; Far-jump to VMM entry at 0x0800:0x0000.
+        ; The retf frame must land OUTSIDE the unix.com blob (phys 0xC000..0x13FFF):
+        ; the old ss=0x800:sp=0x7FFE put it at phys 0xFFFA (= kernel file offset
+        ; 0x3FFA, inside open1), and the VMM's memcpy then carried that corruption
+        ; into the running kernel.  Keep ss=0 -- with ss=0x800 the segment base
+        ; 0x8000 alone lands the frame back in the blob regardless of sp.
+        xor ax, ax
+        mov ss, ax              ; ss = 0  (mov ss / mov sp kept adjacent: the 8086
+        mov sp, 7000h           ; inhibits interrupts for one insn after an ss load)
+        mov ax, 800h
+        push ax                 ; CS = 0x0800
+        xor ax, ax
+        push ax                 ; IP = 0
+        retf
 
 read_failed:
-        mov ah, 0               ; BIOS function to reset the disk system
+        mov ah, 0               ; BIOS reset disk
         int 13h
-        jmp read_loop           ; Retry after resetting
+        jmp read_vmm
 
-read_block:                  
+read_block:
         push ax                 ; Save all registers
         push bx
         push cx
@@ -66,7 +71,7 @@ read_block:
         pop dx
         pop cx
         pop bx
-        pop ax    
+        pop ax
         ret
 
 ; Inputs:
@@ -82,7 +87,7 @@ HEADS             equ 2    ; Number of heads (0 or 1, as head numbers start from
 LBA_to_CHS:
     ; Input: AX = LBA (Logical Block Address)
     push bx                        ; Save BX because it will be modified during the calculations
-    
+
     ; Calculate Cylinder (Track)
     ; CX = LBA / (SECTORS_PER_TRACK * HEADS)
     mov cx, SECTORS_PER_TRACK * HEADS  ; Set CX to sectors per track * heads (18 for 1.2MB floppy)
@@ -95,7 +100,7 @@ LBA_to_CHS:
     mov cl, 0                      ; Clear CL for now (CL will later store the sector number)
 
     ; Now calculate Head and Sector
-    ; DX now contains the LBA remainder, which represents the position within the track, 
+    ; DX now contains the LBA remainder, which represents the position within the track,
     ; we use DX to calculate the head and sector
 
     ; Calculate Head

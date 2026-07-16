@@ -135,6 +135,8 @@ void setpri(struct proc *up)
 void sched(void)
 {
     struct proc *p1;
+    struct text *xp;
+    uint ta;
     register struct proc *rp;
     register int a, n;
 
@@ -166,13 +168,22 @@ loop:
 
     /*
      * see if there is core for that process
+     * (an EXE whose shared text was released from core needs
+     * room for the text image too -- both or neither)
      */
 
     spl0();
     rp = p1;
-    a = rp->p_size;
-    if((a=malloc(coremap, a)) != NULL)
-        goto found2;
+    a = malloc(coremap, rp->p_size);
+    if(a != NULL) {
+        xp = rp->p_textp;
+        if(xp == NULL || xp->x_ccount != 0)
+            goto found2;
+        ta = malloc(coremap, xp->x_size);
+        if(ta != NULL)
+            goto found2;
+        mfree(coremap, rp->p_size, a);
+    }
 
     /*
      * none found,
@@ -224,6 +235,15 @@ found1:
 
 found2:
     rp = p1;
+    if((xp = rp->p_textp) != NULL) {
+        if(xp->x_ccount == 0) {     /* reload the text image (V6); ta was
+                                     * allocated with the data block above */
+            if(swap(xp->x_daddr, ta, xp->x_size, B_READ))
+                goto swaper;
+            xp->x_caddr = ta;
+        }
+        xp->x_ccount++;
+    }
     if(swap(rp->p_addr, a, rp->p_size, B_READ))
         goto swaper;
     mfree(swapmap, rp->p_size*(PAGESIZ/512), rp->p_addr);
@@ -231,11 +251,51 @@ found2:
     rp->p_addr = a;
     rp->p_flag |= SLOAD;
     rp->p_time = 0;
-    estabur(rp->p_addr);
     goto loop;
 
 swaper:
     panic("swap error");
+}
+
+/*
+ * Acquire "need" pages for the running process when coremap is
+ * exhausted, by the V6 expand() trick: encode the extra demand in
+ * p_size and take one round trip through the swap device.  sched
+ * allocates the inflated p_size contiguously at swap-in, swapping
+ * out sleeping processes until it fits, so the allocation is
+ * guaranteed and no retry loop is needed.  The current image
+ * round-trips intact; the extra tail pages are donated out of the
+ * block and their address returned.
+ *
+ * EXE (separated I&D) callers only: the kernel stack lives in the
+ * resident u-page, so the thread survives its data block being on
+ * disk.  A single-segment process must not call this (its u lives
+ * inside the swapped block).
+ */
+uint swgrow(int need)
+{
+    register struct proc *rp;
+    uint a;
+
+    rp = u.u_procp;
+    if(save(u.u_ssav) == 0) {
+        while((a = malloc(swapmap, (rp->p_size+need)*(PAGESIZ/512))) == NULL)
+            sleep(&swapmap, PSWP);
+        xswap(rp, 1, a);        /* writes and frees the old p_size pages */
+        rp->p_size += need;     /* inflate only after xswap (which writes and
+                                 * mfrees p_size pages); the swapmap block
+                                 * above is already sized for the sum */
+        rp->p_flag |= SSWAP;
+        swtch();
+        /* no return */
+    }
+    /*
+     * Swapped back in.  Deflate and donate the tail; no sleep between
+     * the resume and here, so sched never sees the inflated block.
+     */
+    rp = u.u_procp;
+    rp->p_size -= need;
+    return rp->p_addr + rp->p_size;
 }
 
 /*
@@ -332,6 +392,7 @@ loop:
 int newproc(void)
 {
     uint a1, a2;
+    uint ua2;
     struct proc *p, *up;
     register struct proc *rpp, *rip;
     register int *rfp;
@@ -361,6 +422,25 @@ retry:
         panic("no procs");
 
     /*
+     * Separated I&D: claim the child's private u-page up front, sleeping
+     * for core if there is none (the clock wakes lbolt as time passes).
+     * This is fork's only allocation with no swap fallback -- V6 has no
+     * equivalent (its child u lives inside the swapped data image), so
+     * this replaces a "no core for u" panic.  Claimed here, before p_stat
+     * makes the slot runnable and before the resume context is saved:
+     * sleeping later in newproc would clobber u_rsav and leave a
+     * half-built SRUN child visible to swtch (both were real crashes).
+     * The slot is held as SIDL across the sleep so a concurrent fork
+     * cannot take it.
+     */
+    ua2 = 0;
+    if(u.u_procp->p_tsize) {
+        rpp->p_stat = SIDL;
+        while((ua2 = malloc(coremap, 1)) == NULL)
+            sleep(&lbolt, PSWP);
+    }
+
+    /*
      * make proc entry for new proc
      */
 
@@ -384,6 +464,11 @@ retry:
     for(rfp = &u.u_ofile[0]; rfp < &u.u_ofile[NOFILE];)
         if((ofp = *rfp++) != NULL)
             ofp->f_count++;
+    if(rpp->p_textp != NULL) {
+        rpp->p_textp->x_count++;    /* child shares the text (V6) */
+        rpp->p_textp->x_ccount++;   /* child will be in core; the xswap in
+                                     * the no-core path drops this again */
+    }
     u.u_cdir->i_count++;
     /*
      * Partially simulate the environment
@@ -400,6 +485,21 @@ retry:
     n = rip->p_size;
     a1 = rip->p_addr;
     rpp->p_size = n;
+    rpp->p_dsize = rip->p_dsize;   /* same data/stack split as the parent's copied image */
+    /*
+     * Separated I&D: the code segment is shared through the text table
+     * (references taken with the other duplicate entries above); only the
+     * u-area gets a private page, claimed up front (see the top of this
+     * function).  Copied here, after savu, so the copy carries the
+     * just-saved resume context.
+     */
+    rpp->p_taddr = rip->p_taddr;
+    rpp->p_tsize = rip->p_tsize;
+    rpp->p_uaddr = 0;
+    if(rip->p_tsize) {
+        copyseg(rip->p_uaddr, ua2);
+        rpp->p_uaddr = ua2;
+    }
     a2 = malloc(coremap, n);
     /*
      * If there is not enough core for the
@@ -407,20 +507,32 @@ retry:
      * copy.
      */
     if(a2 == NULL) {
-        rip->p_stat = SIDL;
-        rpp->p_addr = a1;
-        if (save(u.u_ssav)) {
-            return(1);
-        }
-        savu(rip);
+        /*
+         * V6's coroutine here lends the parent's identity to the child
+         * (u.u_procp stays rpp) and relies on the child's u living INSIDE
+         * the swapped block, so the thread sleeping in swap() is resumed
+         * through the child entry's p_addr alias of the parent's u.  With
+         * the EXE regime's private u-page that alias is gone: resume(child)
+         * maps the u-page COPY and fires its saved fork-return context, and
+         * the sleeping thread is lost (parent stuck in SIDL forever).
+         * Instead: stay the parent, hide the child from swtch while the
+         * parent's image is written out for it (SIDL), and let sched bring
+         * it in -- the u-page copied above already carries the child's fork
+         * return context (u_rsav), same as the in-core fork path.
+         */
+        u.u_procp = rip;
+        rpp->p_stat = SIDL;
+        rip->p_flag |= SLOCK;   /* our data block is the swap source */
         while(1) {
             a2 = malloc(swapmap, rpp->p_size*(PAGESIZ/512));
             if(a2 != NULL) break;
             sleep(&swapmap, PSWP);
-        };
+        }
+        rpp->p_addr = a1;
         xswap(rpp, 0, a2);
-        rpp->p_flag |= SSWAP;
-        rip->p_stat = SRUN;
+        rip->p_flag &= ~SLOCK;
+        setrun(rpp);            /* SRUN + wake the swapper (runout) */
+        return(0);
     } else {
     /*
      * There is core, so just copy.
@@ -428,10 +540,66 @@ retry:
         rpp->p_addr = a2;
         while(n--)
             copyseg(a1++, a2++);
-        estabur(rpp->p_addr);
     }
     u.u_procp = rip;
     return(0);
+}
+
+/*
+ * Change the size of the data+stack regions of the process.
+ * If the size is shrinking, it's easy-- just release the extra core.
+ * If it's growing, and there is core, just allocate it
+ * and copy the image.
+ * If there is no core, arrange for the process to be swapped
+ * out after adjusting the size requirement-- when it comes
+ * in, enough core will be allocated.
+ * Because of the ssave and SSWAP flags, control will
+ * resume after the swap in swtch, which executes the return
+ * from this stack level.
+ *
+ * After the expansion, the caller will take care of copying
+ * the user's stack towards or away from the data area.
+ *
+ * EXE callers only: the kernel stack lives in the resident
+ * u-page, not in the data block, so the copy is safe while
+ * the process runs and no retu is needed after it (V6's u
+ * moves with the block).  p_size is inflated only after
+ * xswap in the no-core path (xswap writes and frees p_size
+ * pages; V6 covers this with its os argument instead).
+ */
+void expand(int newsize)
+{
+    int i, n;
+    uint a1, a2;
+    register struct proc *p;
+
+    p = u.u_procp;
+    n = p->p_size;
+    a1 = p->p_addr;
+    if(n >= newsize) {
+        p->p_size = newsize;
+        mfree(coremap, n-newsize, a1+newsize);
+        return;
+    }
+    a2 = malloc(coremap, newsize);
+    if(a2 == NULL) {
+        if(save(u.u_ssav) == 0) {
+            while((a2 = malloc(swapmap, (uint)newsize*(PAGESIZ/512))) == NULL)
+                sleep(&swapmap, PSWP);
+            xswap(p, 1, a2);
+            p->p_size = newsize;
+            p->p_flag |= SSWAP;
+            swtch();
+            /* no return */
+        }
+        return;
+    }
+    p->p_size = newsize;
+    p->p_addr = a2;
+    for(i=0; i<n; i++)
+        copyseg(a1+i, a2+i);
+    mfree(coremap, n, a1);
+    sureg(p);
 }
 
 /* external helper function defined in asm code */
@@ -452,18 +620,4 @@ void resume(struct proc *p, label_t ctx)
         retu(resume_proc);
     }
     do_resume(resume_ctx);
-}
-
-void estabur(uint addr)
-{
-    struct user far *pu;
-    struct ctx far *ctx;
-
-    addr = addr * (PAGESIZ / 16);
-    pu = (struct user far *)MK_FP(addr, USTACK);
-    pu->u_stack[KSSIZE - 1] = addr;    /* SS */
-    ctx = (struct ctx far *)MK_FP(addr, pu->u_stack[KSSIZE - 2]);
-    ctx->cs = addr;
-    ctx->ds = addr;
-    ctx->es = addr;
 }

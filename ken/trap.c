@@ -52,7 +52,7 @@ void trap_epilogue(void)
 void trap(void)
 {
     register struct sysent *callp;
-    callp = &sysent[u.u_ar0[R3]];
+    callp = &sysent[u.u_ar0[R3] & 077];
 
     u.u_dirp = u.u_arg[0];
     trap1(callp->call);
@@ -70,8 +70,8 @@ void trap(void)
     setpri(u.u_procp);
 }
 
-void trap0(int ds, int es, int dx, int cx, int bx, int ax, 
-    int di, int si, int bp, int ip, int cs, int flags, 
+void trap0(int ds, int es, int dx, int cx, int bx, int ax,
+    int di, int si, int bp, int ip, int cs, int flags,
     int arg0, int arg1, int arg2)
 {
     (void)es; (void)ds; (void)si; (void)di; (void)bp;
@@ -86,4 +86,78 @@ void trap0(int ds, int es, int dx, int cx, int bx, int ax,
     u.u_arg[2] = arg2;
     u.u_dirp = u.u_arg[0];
     u.u_error = 0;
+}
+
+/*
+ * The VMM u-area window is exactly one page; the kernel stack lives at its
+ * top (U_AREA + 1024 = 0xD400).  segflt/psig/trap_epilogue depend on that
+ * layout, so pin the size at compile time.
+ */
+typedef char user_size_assert[sizeof(struct user) == 0x400 ? 1 : -1];
+
+/*
+ * Copy the faulting 12-word interrupt frame (struct ctx) that _segflt_isr
+ * built on the kernel stack down onto the user stack at usp-24, and point the
+ * return SS:SP (u_stack[KSSIZE-1:-2]) at it.  On return _segflt_isr reloads
+ * that SS:SP and IRETs through the frame: for a restart this re-runs the
+ * faulting instruction; for a caught signal psig() first duplicates the frame
+ * once more and vectors the trampoline.  Both need the frame on the user
+ * stack because a V86 IRET does not reload SS:SP.
+ */
+static void dupframe(unsigned kctx, unsigned uss, unsigned usp)
+{
+    int far *dst = (int far *)MK_FP(uss, usp - 24);
+    int *src = (int *)kctx;            /* near: the ctx in the u page (DS-relative) */
+    int i;
+
+    for(i = 0; i < 12; i++)
+        dst[i] = src[i];
+    u.u_stack[KSSIZE - 1] = uss;
+    u.u_stack[KSSIZE - 2] = usp - 24;
+}
+
+/*
+ * segflt -- kernel handler for a VMM-reflected user #PF, the x86 stand-in for
+ * the PDP-11 segmentation exception (V6 trap.c case 9).  Entered on the kernel
+ * stack from _segflt_isr (dmr/m86.asm) with IF=0; kctx is the near address of
+ * the faulting frame, usp/uss the faulting user SP/SS, fa the WIN_DATA offset
+ * of the fault (or >= USTACK for a read-only text write).
+ *
+ * If the user SP has moved below the stack, grow the stack to cover it and
+ * re-execute the faulting instruction; otherwise it is a segmentation
+ * violation (SIGSEG, default core+exit, catchable on the user stack).
+ *
+ * grow(usp-24): the x86 leaves SP un-decremented on a faulting push, so a
+ * push landing on the stack bottom faults with sp==bottom; growing 24 bytes
+ * (one ctx) of headroom covers both that word and the restart frame dupframe
+ * writes at usp-24.
+ */
+void segflt(unsigned fa, unsigned usp, unsigned uss, unsigned kctx)
+{
+    struct ctx *k = (struct ctx *)kctx;
+    int n;
+
+    spl0();      /* allow clock; grow may sleep in expand's swap path */
+
+    u.u_ar0[R0] = k->ax;
+    u.u_ar0[R1] = k->bx;
+    u.u_ar0[R2] = k->cx;
+    u.u_ar0[R3] = k->dx;
+
+    if(fa < (unsigned)USTACK && grow(usp - 24)) {
+        dupframe(kctx, uss, usp);            /* restart on the grown stack */
+        goto out;
+    }
+    psignal(u.u_procp, SIGSEG);
+    if(n = issig()) {
+        if(u.u_signal[n] != 0) {             /* caught: deliver on the user stack */
+            dupframe(kctx, uss, usp);
+            psig();
+            goto out;
+        }
+        psig();                              /* default: core + exit, no return */
+    }
+    dupframe(kctx, uss, usp);                /* ignored signal: restart (will recur) */
+out:
+    setpri(u.u_procp);
 }
