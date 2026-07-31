@@ -7,6 +7,7 @@ bin     d--755 0 0
         chmod       ---755 0 0 ../usr/chmod.aout
         cp          ---755 0 0 ../usr/cp.aout
         date        ---755 0 0 ../usr/date.aout
+        df          ---755 0 0 ../usr/df.aout
         echo        ---755 0 0 ../usr/echo.aout
         ed          ---755 0 0 ../usr/ed.aout
         fib         ---755 0 0 ../usr/fib.aout

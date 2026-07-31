@@ -3,7 +3,6 @@
 #define UMODE   0170000
 #define SCHMAG  10
 
-int kcount = 0, ucount = 0;
 /*
  * clock is called straight from
  * the real time clock interrupt.
@@ -25,8 +24,6 @@ void clock(int mode)
     register struct callo *p1, *p2;
     register struct proc *pp;
 
-    if(mode==0) kcount++;
-    else ucount++;
     /*
      * callouts
      * if none, just return
@@ -109,11 +106,7 @@ out:
             runin = 0;
             wakeup(&runin);
         }
-    }
-    if((lbolt&7)==0) {
-        runrun++;
-        if(mode!=0)
-        {
+        if(mode!=0) {
             if(issig())
                 psig();
             setpri(u.u_procp);
@@ -160,40 +153,4 @@ void timeout(int (*fun)(int ), int arg, int tim)
     p1->c_func = fun;
     p1->c_arg = arg;
     setps(s);
-}
-
-void isr_savuar(int ds, int es, int dx, int cx, int bx, int ax,
-    int di, int si, int bp, int ip, int cs, int flags)
-{
-    (void)es; (void)ds; (void)si; (void)di; (void)bp;
-    (void)ip; (void)cs; (void)flags;
-
-    u.u_ar0[R0] = ax;
-    u.u_ar0[R1] = bx;
-    u.u_ar0[R2] = cx;
-    u.u_ar0[R3] = dx;
-}
-
-void isr_router(int irq, int mode)
-{
-    switch(irq)
-    {
-        case 0: clock(mode); break;
-        case 1: ideintr(); break;
-        case 2: kbdintr(); break;
-        case 3: uartintr(); break;
-    }
-}
-
-void check_runrun(void)
-{
-loop:
-    spl7();
-    if(runrun == 0)
-    {
-        return;
-    }
-    spl0();
-    swtch();
-    goto loop;
 }

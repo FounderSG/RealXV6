@@ -244,7 +244,7 @@ profil()
  * psinfo - process status query (replaces the old getkaddr peek).
  *
  * Copy proc[index] out to the user buffer, followed by a 512-byte image of the
- * top of that process's user stack ([USTACK-512, USTACK)), where exec leaves the
+ * top of that process's user stack (the top 512-byte block), where exec leaves the
  * argument vector.  ps assembles the COMMAND column from that image, so it never
  * reads /dev/mem or /dev/kmem and never needs to know the physical layout: the
  * kernel, which owns the mapping, resolves it here.  This is also what lets the
@@ -284,19 +284,25 @@ loop:
     osize = p->p_size;
     opid  = p->p_pid;
     /*
-     * The user stack sits at the tail of the (possibly sparse) data block, so
-     * the top page [USTACK-512, USTACK) is the block's last physical page,
-     * p_addr + p_size - 1, at page offset (USTACK-512) & (PAGESIZ-1) = 0xE00.
-     * This reaches any process (current or not) via the identity map, since
-     * core blocks are allocated at physical pages >= USPACE, outside the windows.
+     * The user stack sits at the tail of the (possibly sparse) data block; exec
+     * leaves the arg frame in the top 512-byte block of the top stack page,
+     * which is the block's last physical page (p_addr + p_size - 1) at page
+     * offset PAGESIZ-512 = 0xE00.  (USTACK's top 2 bytes are unused, so this
+     * block is 512-aligned and a single swap read suffices.)  This reaches any
+     * process (current or not) via the identity map, since core blocks are
+     * allocated at physical pages >= USPACE, outside the windows.
      */
     if(p->p_flag & SLOAD) {
-        /* in core: identity-mapped, no sleep, so it cannot race the swapper */
-        memcpy(MK_FP((unsigned)u.u_procp->p_addr*(PAGESIZ/16), sdst),
-               MK_FP((unsigned)(oaddr+osize-1)*(PAGESIZ/16), (USTACK-512)&(PAGESIZ-1)),
+        /* In core: read the target's top page by identity map (no sleep, so it
+         * cannot race the swapper).  Write into ps's own buffer through ps's
+         * data window (user_dseg = WIN_DATA), not a raw p_addr identity offset:
+         * the data block now starts at slot 1 (slot 0 = u), so a p_addr-based
+         * offset would land one page low, in ps's u-area. */
+        memcpy(MK_FP((unsigned)user_dseg, sdst),
+               MK_FP((unsigned)(oaddr+osize-1)*(PAGESIZ/16), PAGESIZ-512),
                512);
     } else {
-        bp = bread(swapdev, oaddr + (osize-1)*(PAGESIZ/512) + (((USTACK-512)&(PAGESIZ-1))>>9));
+        bp = bread(swapdev, oaddr + (osize-1)*(PAGESIZ/512) + (PAGESIZ/512 - 1));
         if(p->p_pid != opid || (p->p_flag&SLOAD) || p->p_addr != oaddr) {
             brelse(bp);                 /* swapped in while we slept; reread */
             goto loop;

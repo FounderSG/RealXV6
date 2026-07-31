@@ -451,9 +451,79 @@ loop:
  * Essentially all the work is computing physical addresses and
  * validating them.
  */
-void physio(int (*strat)(), struct buf *abp, int dev, int rw)
+void physio(void (*strat)(struct buf *), struct buf *abp, int dev, int rw)
 {
-    /* Read/write disk as character device. Not implemented. */
+    register struct buf *bp;
+    register struct proc *pp;
+    uint base, off, seg;
+    int page, nsect;
+
+    bp = abp;
+    base = (uint)u.u_base;
+    /*
+     * The IDE backend moves whole 512-byte sectors, so transfer as many full
+     * sectors as u_count allows; a sub-sector tail is left in u_count and
+     * reported to the caller (via rdwr) as "not transferred".
+     */
+    nsect = u.u_count >> 9;
+    if(nsect == 0)
+        return;
+    /*
+     * Check odd base, odd count, and address wraparound.  Word PIO needs an
+     * even base and count; V6 rejected the same cases.
+     */
+    if((base&01) || (u.u_count&01) || base >= base + u.u_count)
+        goto bad;
+    pp = u.u_procp;
+    /*
+     * Locate the user buffer's ABSOLUTE (identity-mapped) physical page.  V6
+     * simulated the PDP-11 segmentation registers here; the port instead reads
+     * the compact block layout [u][data][stack] at p_addr.  The address must
+     * be identity-mapped, NOT reached through the per-process WIN_DATA window,
+     * because the transfer finishes at interrupt time when another process may
+     * own that window -- the same reason swap() addresses core by page number.
+     */
+    /* separated I&D: data in the low window slots, stack in the high ones */
+    if(base + u.u_count <= (uint)pp->p_dsize << 12)
+        page = pp->p_addr + 1 + (base >> 12);
+    else if(base >= (uint)(UDPAGES - pp->p_ssize) << 12)
+        page = pp->p_addr + 1 + pp->p_dsize +
+               ((base >> 12) - (UDPAGES - pp->p_ssize));
+    else
+        goto bad;       /* not wholly in the data nor wholly in the stack */
+    off = base & (PAGESIZ-1);
+    seg = (uint)page * (PAGESIZ/16) + (off >> 4);
+    off &= 017;
+
+    spl6();
+    while (bp->b_flags&B_BUSY) {
+        bp->b_flags |= B_WANTED;
+        sleep(bp, PRIBIO);
+    }
+    bp->b_flags = B_BUSY | B_PHYS | rw;
+    bp->b_dev = dev;
+    bp->b_xmem = (void *)seg;
+    bp->b_addr = (void *)off;
+    bp->b_blkno = lshift(u.u_offset, -9);
+    bp->b_wcount = nsect;
+    bp->b_error = 0;
+    pp->p_flag |= SLOCK;
+    (*strat)(bp);
+    spl6();
+    while ((bp->b_flags&B_DONE) == 0)
+        sleep(bp, PRIBIO);
+    pp->p_flag &= ~SLOCK;
+    if (bp->b_flags&B_WANTED)
+        wakeup(bp);
+    spl0();
+    bp->b_flags &= ~(B_BUSY|B_WANTED);
+    if ((bp->b_flags&B_ERROR) == 0)
+        u.u_count -= (uint)nsect << 9;
+    geterror(bp);
+    return;
+
+bad:
+    u.u_error = EFAULT;
 }
 
 /*

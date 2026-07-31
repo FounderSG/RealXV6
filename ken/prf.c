@@ -1,11 +1,11 @@
 #include "os.h"
 
-extern void putck(char c);
+extern void putchar(char c);
 
 /*
  * In case console is off,
  * panicstr contains argument to last
- * call to panic
+ * call to panic.
  */
 char *panicstr;
 
@@ -18,7 +18,7 @@ void printn(unsigned n, unsigned b)
     unsigned a;
     if((a = n/b)!=0)
         printn(a, b);
-    putck(digits[n%b]);
+    putchar(digits[n%b]);
 }
 
 /*
@@ -31,7 +31,7 @@ void printn(unsigned n, unsigned b)
  * suspended.
  * Printf should not be used for chit-chat.
  */
-void printk(char *fmt, ...)
+void printf(char *fmt, ...)
 {
     char *s;
     unsigned *adx, c;
@@ -41,7 +41,7 @@ loop:
     while((c = *fmt++) != '%') {
         if(c == '\0')
             return;
-        putck(c);
+        putchar(c);
     }
     c = *fmt++;
     if(c == 'd' || c == 'l')
@@ -53,7 +53,7 @@ loop:
     if(c == 's') {
         s = (char *)*adx;
         while((c = *s++)!=0)
-            putck(c);
+            putchar(c);
     }
     adx++;
     goto loop;
@@ -69,7 +69,7 @@ void panic(char *s)
 {
     panicstr = s;
     update();
-    printk("panic: %s\n", s);
+    printf("panic: %s\n", s);
     for(;;)
         idle();
 }
@@ -82,7 +82,7 @@ void panic(char *s)
  */
 void prdev(char *str, int dev)
 {
-    printk("%s on dev %l/%l\n", 
+    printf("%s on dev %l/%l\n", 
             str, major(dev), minor(dev));
 }
 
@@ -91,13 +91,13 @@ void prdev(char *str, int dev)
  * a device driver.
  * It prints the device, block number,
  * and an octal word (usually some error
- * status register) passed as argument
+ * status register) passed as argument.
  */
 void deverror(struct buf *bp, int o1, int o2)
 {
     register struct buf *rbp;
 
     rbp = bp;
-    prdev("Error", bp->b_dev);
-    printk("bn%d er%d %d\n", rbp->b_blkno, o1, o2);
+    prdev("err", rbp->b_dev);
+    printf("bn%l er%o %o\n", rbp->b_blkno, o1, o2);
 }

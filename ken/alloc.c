@@ -126,8 +126,10 @@ void free(int dev, int bno)
  *
  * bad block on dev x/y -- not in range
  */
-int badblock(struct filsys *fp, int bn, int dev)
+int badblock(struct filsys *fp, int abn, int dev)
 {
+    register uint bn = abn;
+
     if (bn < fp->s_isize+2 || bn >= fp->s_fsize) {
         prdev("bad block", dev);
         return(1);
@@ -211,7 +213,7 @@ loop:
  * on the specified device.
  * The algorithm stores up
  * to 100 I nodes in the super
- * block and throws aways any more.
+ * block and throws away any more.
  */
 void ifree(int dev, int ino)
 {
@@ -248,7 +250,7 @@ struct filsys *getfs(int dev)
 {
     struct mount *p;
     struct filsys *fp;
-    int n1, n2;
+    uint n1, n2;
 
     for(p = &mount[0]; p < &mount[NMOUNT]; p++)
     if(p->m_bufp != NULL && p->m_dev == dev) {
@@ -281,7 +283,6 @@ void update(void)
     struct mount *mp;
     struct buf *bp;
     struct filsys *fp;
-    int *wp;
 
     if(updlock)
         return;

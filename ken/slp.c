@@ -267,10 +267,14 @@ swaper:
  * round-trips intact; the extra tail pages are donated out of the
  * block and their address returned.
  *
- * EXE (separated I&D) callers only: the kernel stack lives in the
- * resident u-page, so the thread survives its data block being on
- * disk.  A single-segment process must not call this (its u lives
- * inside the swapped block).
+ * The u-area (slot 0) rides the block through xswap and is revived on
+ * swap-in via SSWAP/u_ssav (pure V6), so this no longer depends on a
+ * resident u-page; the single-seg restriction is lifted (in practice only
+ * the EXE exec/xalloc paths call it).
+ *
+ * The inflated p_size never reaches the user window: sureg takes the stack
+ * extent from p_ssize (untouched here), so the swap-in maps the intact old
+ * image and this routine needs no special-casing.
  */
 uint swgrow(int need)
 {
@@ -392,7 +396,6 @@ loop:
 int newproc(void)
 {
     uint a1, a2;
-    uint ua2;
     struct proc *p, *up;
     register struct proc *rpp, *rip;
     register int *rfp;
@@ -420,25 +423,6 @@ retry:
     }
     if ((rpp = p)==NULL)
         panic("no procs");
-
-    /*
-     * Separated I&D: claim the child's private u-page up front, sleeping
-     * for core if there is none (the clock wakes lbolt as time passes).
-     * This is fork's only allocation with no swap fallback -- V6 has no
-     * equivalent (its child u lives inside the swapped data image), so
-     * this replaces a "no core for u" panic.  Claimed here, before p_stat
-     * makes the slot runnable and before the resume context is saved:
-     * sleeping later in newproc would clobber u_rsav and leave a
-     * half-built SRUN child visible to swtch (both were real crashes).
-     * The slot is held as SIDL across the sleep so a concurrent fork
-     * cannot take it.
-     */
-    ua2 = 0;
-    if(u.u_procp->p_tsize) {
-        rpp->p_stat = SIDL;
-        while((ua2 = malloc(coremap, 1)) == NULL)
-            sleep(&lbolt, PSWP);
-    }
 
     /*
      * make proc entry for new proc
@@ -486,20 +470,15 @@ retry:
     a1 = rip->p_addr;
     rpp->p_size = n;
     rpp->p_dsize = rip->p_dsize;   /* same data/stack split as the parent's copied image */
+    rpp->p_ssize = rip->p_ssize;   /* stack extent (proc field, so copied explicitly) */
     /*
      * Separated I&D: the code segment is shared through the text table
-     * (references taken with the other duplicate entries above); only the
-     * u-area gets a private page, claimed up front (see the top of this
-     * function).  Copied here, after savu, so the copy carries the
-     * just-saved resume context.
+     * (references taken with the other duplicate entries above); the u-area
+     * is slot 0 of the block and rides the whole-block copy below (or the
+     * xswap image in the no-core path), so no private u-page is needed.
      */
     rpp->p_taddr = rip->p_taddr;
     rpp->p_tsize = rip->p_tsize;
-    rpp->p_uaddr = 0;
-    if(rip->p_tsize) {
-        copyseg(rip->p_uaddr, ua2);
-        rpp->p_uaddr = ua2;
-    }
     a2 = malloc(coremap, n);
     /*
      * If there is not enough core for the
@@ -508,34 +487,29 @@ retry:
      */
     if(a2 == NULL) {
         /*
-         * V6's coroutine here lends the parent's identity to the child
-         * (u.u_procp stays rpp) and relies on the child's u living INSIDE
-         * the swapped block, so the thread sleeping in swap() is resumed
-         * through the child entry's p_addr alias of the parent's u.  With
-         * the EXE regime's private u-page that alias is gone: resume(child)
-         * maps the u-page COPY and fires its saved fork-return context, and
-         * the sleeping thread is lost (parent stuck in SIDL forever).
-         * Instead: stay the parent, hide the child from swtch while the
-         * parent's image is written out for it (SIDL), and let sched bring
-         * it in -- the u-page copied above already carries the child's fork
-         * return context (u_rsav), same as the in-core fork path.
+         * No core: swap the current image out to generate the child's copy.
+         * Lend the parent's identity to the child (u.u_procp stays rpp) and
+         * hide the parent from the scheduler (SIDL) while its image -- whose
+         * slot 0 is the live u carrying the child's fork-return context --
+         * is written out for the child.  The child is revived by sched via
+         * SSWAP (swtch resumes it through u_ssav).  Restored to V6 now that
+         * u lives inside the swapped block again (the private-u-page regime
+         * could not do this -- the swapped image held no u_ssav).
          */
-        u.u_procp = rip;
-        rpp->p_stat = SIDL;
-        rip->p_flag |= SLOCK;   /* our data block is the swap source */
-        while(1) {
-            a2 = malloc(swapmap, rpp->p_size*(PAGESIZ/512));
-            if(a2 != NULL) break;
-            sleep(&swapmap, PSWP);
+        rip->p_stat = SIDL;
+        rpp->p_addr = a1;           /* child aliases the parent's live image */
+        if(save(u.u_ssav)) {
+            return(1);              /* child: revived here after swap-in */
         }
-        rpp->p_addr = a1;
-        xswap(rpp, 0, a2);
-        rip->p_flag &= ~SLOCK;
-        setrun(rpp);            /* SRUN + wake the swapper (runout) */
-        return(0);
+        while((a2 = malloc(swapmap, rpp->p_size*(PAGESIZ/512))) == NULL)
+            sleep(&swapmap, PSWP);
+        xswap(rpp, 0, a2);          /* write the image for the child; ff=0
+                                     * keeps the parent's core intact */
+        rpp->p_flag |= SSWAP;
+        rip->p_stat = SRUN;
     } else {
     /*
-     * There is core, so just copy.
+     * There is core, so just copy (slot 0 = the child's u).
      */
         rpp->p_addr = a2;
         while(n--)
@@ -560,12 +534,12 @@ retry:
  * After the expansion, the caller will take care of copying
  * the user's stack towards or away from the data area.
  *
- * EXE callers only: the kernel stack lives in the resident
- * u-page, not in the data block, so the copy is safe while
- * the process runs and no retu is needed after it (V6's u
- * moves with the block).  p_size is inflated only after
- * xswap in the no-core path (xswap writes and frees p_size
- * pages; V6 covers this with its os argument instead).
+ * The u-area is slot 0 of the block, so the in-core copy moves the
+ * live kernel stack too; uswitch() then remaps WIN_U to the new page
+ * (the x86 retu), continuing on the copied stack -- V6's expand does
+ * the same via copyseg of the u/stack pages followed by retu.  p_size
+ * is inflated only after xswap in the no-core path (xswap writes and
+ * frees p_size pages; V6 covers this with its os argument instead).
  */
 void expand(int newsize)
 {
@@ -594,30 +568,14 @@ void expand(int newsize)
         }
         return;
     }
-    p->p_size = newsize;
-    p->p_addr = a2;
-    for(i=0; i<n; i++)
-        copyseg(a1+i, a2+i);
-    mfree(coremap, n, a1);
-    sureg(p);
-}
-
-/* external helper function defined in asm code */
-extern void use_resume_stack(void);
-extern void do_resume(label_t ctx);
-struct proc *resume_proc;
-int *resume_ctx;
-void resume(struct proc *p, label_t ctx)
-{
-    resume_proc = p;
-    resume_ctx = ctx;
-    use_resume_stack();
-
-    if(resume_proc != u.u_procp)
-    {
-        if(u.u_procp->p_stat != SZOMB)
-            savu(u.u_procp);
-        retu(resume_proc);
+    if(save(u.u_rsav) == 0) {
+        p->p_size = newsize;
+        p->p_addr = a2;
+        for(i=0; i<n; i++)
+            copyseg(a1+i, a2+i);       /* incl slot 0 (the live u) */
+        mfree(coremap, n, a1);
+        uswitch(p, u.u_rsav);
+        /* no return */
     }
-    do_resume(resume_ctx);
+    /* running on the new u-page; retu(=sureg) done inside uswitch */
 }

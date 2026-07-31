@@ -39,6 +39,11 @@ void rkstrategy(struct buf *abp)
     spl0();
 }
 
+/*
+ * RK05 cylinder/sector geometry.  Not used in this port: the rk driver is
+ * remapped onto IDE, which devstart addresses linearly through ideio, so
+ * this V6 disk-address computation is never called.  Kept for reference.
+ */
 int rkaddr(struct buf *bp)
 {
     register struct buf *p;
@@ -87,12 +92,37 @@ void devstart(struct buf *bp)
     void far *p;
 
     if(bp->b_flags&B_PHYS) {
-        p = MK_FP((uint)(bp->b_xmem)*(PAGESIZ/16), 0);
-        n = (PAGESIZ/512) * bp->b_wcount;
+        if(bp == &rrkbuf) {
+            /* raw char I/O: physio put the buffer's absolute (identity) far
+             * address in b_xmem:b_addr and a sector count in b_wcount. */
+            p = MK_FP((uint)bp->b_xmem, (uint)bp->b_addr);
+            n = bp->b_wcount;
+        } else {
+            /* swap: b_wcount whole pages from page b_xmem, offset 0. */
+            p = MK_FP((uint)(bp->b_xmem)*(PAGESIZ/16), 0);
+            n = (PAGESIZ/512) * bp->b_wcount;
+        }
     } else {
         p = MK_FP(core_cs, bp->b_addr);
         n = 1;
     }
 
     ideio(bp->b_blkno + NRKBLK * minor(bp->b_dev), n, p, bp->b_flags&B_READ);
+}
+
+/*
+ * Raw (unbuffered) disk access through the character device.  Both hand a
+ * device-owned buffer header (rrkbuf) to physio, which validates the user
+ * buffer and drives rkstrategy directly, bypassing the buffer cache.
+ */
+int rkread(int dev)
+{
+    physio(rkstrategy, &rrkbuf, dev, B_READ);
+    return 0;
+}
+
+int rkwrite(int dev)
+{
+    physio(rkstrategy, &rrkbuf, dev, B_WRITE);
+    return 0;
 }

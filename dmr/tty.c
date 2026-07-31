@@ -634,7 +634,7 @@ int putc(char c, struct clist *pList)
     setps(s);
     return 0;
 error:
-    printk("ERROR cfreelist is NULL");
+    printf("ERROR cfreelist is NULL");
     setps(s);
     return -1;
 }

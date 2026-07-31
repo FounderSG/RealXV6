@@ -294,20 +294,20 @@ static void hyper_dispatch(struct trap_frame *tf)
             for (; k < 16; k++)
                 pt0[0xA0 + k] = 0;
 
-            /* WIN_DATA sparse (linear 0xD0000, pt0[0xD0..0xDF]):
-             * data pages at low slots, stack pages at high slots (just under
-             * NS=15), heap gap in between left not-present. */
-            if ((u32)dsize + ssize > 15) {
-                log_puts("HVC_SUREG d+s>15\r\n");
+            /* WIN_DATA sparse (linear 0xD0000, pt0[0xD0..0xDF]): data pages at
+             * low slots, stack pages at high slots, heap gap in between left
+             * not-present.  All 16 slots are usable (UDPAGES=16); USTACK's top
+             * 2 bytes (0xFFFE-0xFFFF) are reserved, so slot 0xDF is real stack. */
+            if ((u32)dsize + ssize > 16) {
+                log_puts("HVC_SUREG d+s>16\r\n");
                 for (;;) ;
             }
             for (k = 0; k < dsize; k++)
                 pt0[0xD0 + k] = ((u32)(daddr + k) << 12) | 0x7u;
-            for (k = dsize; k < (u32)(15 - ssize); k++)
+            for (k = dsize; k < (u32)(16 - ssize); k++)
                 pt0[0xD0 + k] = 0;
             for (k = 0; k < ssize; k++)
-                pt0[0xD0 + (15 - ssize) + k] = ((u32)(daddr + dsize + k) << 12) | 0x7u;
-            pt0[0xDF] = 0;                         /* slot 15: above USTACK, not-present */
+                pt0[0xD0 + (16 - ssize) + k] = ((u32)(daddr + dsize + k) << 12) | 0x7u;
         }
 
         flush_tlb();
@@ -432,28 +432,28 @@ static void check_wild_out(struct trap_frame *tf, unsigned port)
 /* --------------------------------------------------------------------------
  * Reflect a user #PF to the guest as a trap on the KERNEL stack (the user SP
  * may be inside the not-present stack gap, so it cannot be used).  Push, at
- * the top of the u-area kernel stack (WIN_U, top = 0xD400), the user iret
+ * the top of the u-area kernel stack (WIN_U, top = 0xE000), the user iret
  * frame {ip,cs,flags} plus {fault_off, user_sp, user_ss}, then vector CS:IP to
  * _segflt_isr with SS:SP = kernel stack.  The faulting user's GP registers and
  * DS/ES are left live in tf so _segflt_isr's EnterISR captures them into a
- * struct ctx.  fault_off is the WIN_DATA-relative offset (< USTACK = 0xF000)
+ * struct ctx.  fault_off is the WIN_DATA-relative offset (< USTACK = 0xFFFE)
  * for a stack-growth candidate, or USTACK for a read-only WIN_TEXT write,
  * which segflt() turns straight into SIGSEG.
  * ------------------------------------------------------------------------ */
 static void pfault_trap(struct trap_frame *tf, u16 fault_off)
 {
-    u16 *ktop = (u16 *)(WIN_U_LINEAR + 0x400u);   /* just past u_stack top (0xD400) */
-    ktop[-1] = (u16)tf->ss_v86;      /* 0xD3FE  user_ss */
-    ktop[-2] = (u16)tf->esp_v86;     /* 0xD3FC  user_sp */
-    ktop[-3] = fault_off;            /* 0xD3FA */
-    ktop[-4] = (u16)tf->eflags;      /* 0xD3F8  user flags */
-    ktop[-5] = (u16)tf->cs;          /* 0xD3F6  user cs */
-    ktop[-6] = (u16)tf->eip;         /* 0xD3F4  user ip */
+    u16 *ktop = (u16 *)(WIN_U_LINEAR + 0x1000u);  /* just past kernel stack top (0xE000) */
+    ktop[-1] = (u16)tf->ss_v86;      /* 0xDFFE  user_ss */
+    ktop[-2] = (u16)tf->esp_v86;     /* 0xDFFC  user_sp */
+    ktop[-3] = fault_off;            /* 0xDFFA */
+    ktop[-4] = (u16)tf->eflags;      /* 0xDFF8  user flags */
+    ktop[-5] = (u16)tf->cs;          /* 0xDFF6  user cs */
+    ktop[-6] = (u16)tf->eip;         /* 0xDFF4  user ip */
 
     tf->cs      = GUEST_CS;
     tf->eip     = (u32)g_segflt_isr_ip;
     tf->ss_v86  = GUEST_CS;
-    tf->esp_v86 = 0xD400u - 12u;     /* 0xD3F4: SP at the user ip word */
+    tf->esp_v86 = 0xE000u - 12u;     /* 0xDFF4: SP at the user ip word */
     tf->eflags  = (tf->eflags & ~(u32)0x200u) | (u32)(1u << 17); /* VM=1, IF=0 */
     /* leave tf->ds, tf->es and tf->eax..edi = faulting user state for EnterISR */
 }
@@ -527,7 +527,7 @@ void trap_dispatch(struct trap_frame *tf)
          * reflect to the guest kernel, which kills the process (V6: text
          * segments are pure).  ec: P=1 and W=1. */
         if ((ec & 3) == 3 && cr2 >= 0xA0000u && cr2 < 0xB0000u) {
-            pfault_trap(tf, 0xF000u);   /* >= USTACK (0xF000): segflt -> SIGSEG */
+            pfault_trap(tf, 0xFFFEu);   /* >= USTACK (0xFFFE): segflt -> SIGSEG */
             return;
         }
 
@@ -544,10 +544,10 @@ void trap_dispatch(struct trap_frame *tf)
             for (;;) ;
         }
 
-        /* CR2 outside WIN_DATA (linear 0xD0000..0xDEFFF): unexpected.
+        /* CR2 outside WIN_DATA (linear 0xD0000..0xDFFFF): unexpected.
          * Log frame values only (no dereference: ss:sp may be unmapped, and
          * for a ring-0 fault the tail of the frame is not even pushed). */
-        if (cr2 < 0xD0000u || cr2 >= 0xDF000u) {
+        if (cr2 < 0xD0000u || cr2 >= 0xE0000u) {
             log_puts("\r\n=== VMM #PF outside WIN_DATA cr2=");
             log_hex(cr2);
             log_puts(" err="); log_hex(tf->errcode);

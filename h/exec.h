@@ -19,14 +19,14 @@
  */
 struct exec
 {
-    int a_magic;    /* magic number, A_MAGIC for separated I&D */
-    int a_text;     /* size of code segment in bytes */
-    int a_data;     /* size of initialized data in bytes */
-    int a_bss;      /* size of bss (uninitialized data) in bytes */
-    int a_syms;     /* size of symbol table (unused, 0) */
-    int a_entry;    /* entry point: offset into the code segment */
-    int a_stack;    /* user stack size in bytes (the high end of the data seg) */
-    int a_flag;     /* unused */
+    int  a_magic;   /* magic number, A_MAGIC for separated I&D */
+    uint a_text;    /* size of code segment in bytes */
+    uint a_data;    /* size of initialized data in bytes */
+    uint a_bss;     /* size of bss (uninitialized data) in bytes */
+    int  a_syms;    /* size of symbol table (unused, 0) */
+    uint a_entry;   /* entry point: offset into the code segment */
+    uint a_stack;   /* user stack size in bytes (the high end of the data seg) */
+    int  a_flag;    /* unused */
 };
 
 #define A_MAGIC 0411    /* separated instruction & data (V6 0411) */

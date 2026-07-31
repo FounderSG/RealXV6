@@ -65,11 +65,11 @@
 #define WINSEG  0xA000  /* EXE code-window selector (VMM WIN_TEXT @ linear 0xA0000, VGA-graphics hole) */
 #define WDSEG   0xD000  /* EXE data-window selector (VMM WIN_DATA @ linear 0xD0000, option-ROM hole;
                          * unrelated to the kernel's u window at DS:0xD000 = linear 0x1D000) */
-#define USTACK  0xF000  /* top of user stack */
-#define KSSIZE  380     /* size of kernel stack in words (grew by 15 when the
-                         * VMM u_fault save area was removed in stage 5; keeps
-                         * sizeof(struct user) == 0x400 so the kernel stack top
-                         * stays at U_AREA+1024 = 0xD400) */
+#define USTACK  0xFFFE  /* top of user stack.  The top 2 bytes (0xFFFE-0xFFFF)
+                         * are left unused so the arg-frame image psinfo/ps read
+                         * stays in the top 512-byte block of the stack page. */
+#define UDPAGES 16      /* pages in the user data segment (data+stack, D-space);
+                         * = (USTACK+2)/PAGESIZ, the full 64K DS window */
 #define NULL    0
 #define NODEV   (-1)
 #define ROOTINO 1       /* i number of all roots */

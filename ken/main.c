@@ -42,6 +42,7 @@ struct bdevsw bdevsw[] = {
 struct cdevsw cdevsw[] = {
     { klopen, klclose, klread, klwrite, klsgtty },
     { nulldev, nulldev, mmread, mmwrite, mmsgtty },
+    { nulldev, nulldev, rkread, rkwrite, (int (*)(int, int *))nulldev },
     { NULL, NULL, NULL, NULL, NULL }
 };
 
@@ -94,7 +95,7 @@ void main()
     u.u_cdir = iget(rootdev, ROOTINO);
     u.u_cdir->i_flag &= ~ILOCK;
 
-    printk("Unix Ready.\r\n");
+    printf("Unix Ready.\r\n");
 
     /*
      * make init process
@@ -123,14 +124,14 @@ void main()
  * Sizes are in pages: x86 paging stands in for
  * the PDP-11 APRs, so where V6 builds the
  * u_uisa/u_uisd prototypes here, this port keeps
- * the equivalent state in the proc entry and
- * sureg rebuilds the windows from it.  The +1 is
- * the EXE u-page (V6's USIZE analog).
+ * the equivalent state (p_tsize/p_dsize/p_ssize) in
+ * the proc entry and sureg rebuilds the windows from
+ * it.  The +1 is the u page in slot 0 of the block.
  */
 int estabur(int nt, int nd, int ns, int sep)
 {
     if(sep)
-        if(nd+ns > USTACK/PAGESIZ)
+        if(nd+ns > UDPAGES)
             goto err;
     if(nt+nd+ns+1 > maxmem)
         goto err;

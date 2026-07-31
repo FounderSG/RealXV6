@@ -39,7 +39,7 @@ void closef(struct file *fp)
     register struct inode *ip;
 
     rfp = fp;
-    if(rfp->f_flag&FPIPE) { /* pipes are different */
+    if(rfp->f_flag&FPIPE) {
         ip = rfp->f_inode;
         ip->i_mode &= ~(IREAD|IWRITE);
         wakeup(ip+1);
@@ -239,7 +239,7 @@ struct file *falloc()
             fp->f_offset[1] = 0;
             return(fp);
         }
-    printk("no file\n");
+    printf("no file\n");
     u.u_error = ENFILE;
     return(NULL);
 }

@@ -35,6 +35,32 @@ void xswap(struct proc *p, int ff, uint a)
 }
 
 /*
+ * relinquish use of the shared text segment
+ * of a process.
+ */
+void xfree(void)
+{
+    struct text *xp;
+    struct inode *ip;
+
+    if((xp=u.u_procp->p_textp) != NULL) {
+        u.u_procp->p_textp = NULL;
+        xccdec(xp);
+        if(--xp->x_count == 0) {
+            ip = xp->x_iptr;
+            if((ip->i_mode&ISVTX) == 0) {
+                xp->x_iptr = NULL;
+                mfree(swapmap, xp->x_size*(PAGESIZ/512), xp->x_daddr);
+                                /* unit fix vs V6's (x_size+7)/8: x_size is
+                                 * pages here, one page = 8 swap sectors */
+                ip->i_flag &= ~ITEXT;
+                iput(ip);
+            }
+        }
+    }
+}
+
+/*
  * Attach to a shared text segment.  If the file's text is already in the
  * table, share it; otherwise claim a free slot, allocate core and read the
  * image in.  tsize is the text byte count (hdr.a_text): V6 takes it from
@@ -56,7 +82,7 @@ void xswap(struct proc *p, int ff, uint a)
  * panic: out of swap space
  * panic: swap error
  */
-void xalloc(struct inode *ip, int tsize)
+void xalloc(struct inode *ip, uint tsize)
 {
     register struct text *xp;
     register struct text *rp;
@@ -80,8 +106,8 @@ void xalloc(struct inode *ip, int tsize)
             }
     if((xp=rp) == NULL)
         panic("out of text");
-    ts = (unsigned)tsize / PAGESIZ;
-    if((unsigned)tsize % PAGESIZ)
+    ts = tsize / PAGESIZ;
+    if(tsize % PAGESIZ)
         ts++;
     if((ta = malloc(coremap, ts)) == NULL) {
         ta = swgrow(ts);            /* V6 reaches this point through expand(),
@@ -175,32 +201,6 @@ out:
     }
     xp->x_ccount++;
     u.u_procp->p_taddr = xp->x_caddr;
-}
-
-/*
- * relinquish use of the shared text segment
- * of a process.
- */
-void xfree(void)
-{
-    struct text *xp;
-    struct inode *ip;
-
-    if((xp=u.u_procp->p_textp) != NULL) {
-        u.u_procp->p_textp = NULL;
-        xccdec(xp);
-        if(--xp->x_count == 0) {
-            ip = xp->x_iptr;
-            if((ip->i_mode&ISVTX) == 0) {
-                xp->x_iptr = NULL;
-                mfree(swapmap, xp->x_size*(PAGESIZ/512), xp->x_daddr);
-                                /* unit fix vs V6's (x_size+7)/8: x_size is
-                                 * pages here, one page = 8 swap sectors */
-                ip->i_flag &= ~ITEXT;
-                iput(ip);
-            }
-        }
-    }
 }
 
 /*

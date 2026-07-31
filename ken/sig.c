@@ -33,7 +33,7 @@ void signal(struct tty *tp, int sig)
     register struct proc *p;
 
     for(p = &proc[0]; p < &proc[NPROC]; p++)
-        if(p->p_ttyp == (int)tp)
+        if(p->p_ttyp == tp)
             psignal(p, sig);
 }
 
@@ -124,8 +124,6 @@ void psig(void)
 {
     register int n, p;
     register struct proc *rp;
-    int far *ustack;
-    struct ctx far *ctx;
 
     rp = u.u_procp;
     n = rp->p_sig;
@@ -133,18 +131,8 @@ void psig(void)
     if((p=u.u_signal[n]) != 0) {
         u.u_error = 0;
         if(n != SIGINS && n != SIGTRC)
-            u.u_signal[n] = 0;        
-        u.u_stack[KSSIZE - 2] -= 24;  /* duplicate interrupt stack frame */
-        ustack = (int far *)MK_FP(u.u_stack[KSSIZE - 1], u.u_stack[KSSIZE - 2]);
-        memcpy(ustack, &ustack[12], 24);
-        ctx = (struct ctx far *)ustack;
-        ctx->ip = SIGTRAMP_EXE;
-        ctx->si = p;
-        ctx = (struct ctx far *)&ustack[12];
-        /* ip, cs, flag = ax, flag, return address */
-        ctx->cs = ctx->flag;
-        ctx->flag = ctx->ip;
-        ctx->ip = ctx->ax;
+            u.u_signal[n] = 0;
+        sendsig(p);
         return;
     }
     switch(n) {
@@ -198,7 +186,7 @@ int core(void)
         u.u_offset[0] = 0;
         u.u_offset[1] = 0;
         u.u_base = (char *)&u;
-        u.u_count = sizeof(u);
+        u.u_count = PAGESIZ;
         u.u_segflg = 1;
         writei(ip);
         /*
@@ -211,8 +199,8 @@ int core(void)
         u.u_count = u.u_procp->p_dsize * PAGESIZ;
         u.u_segflg = 0;
         writei(ip);
-        ns = u.u_procp->p_size - u.u_procp->p_dsize;
-        u.u_base = (char *)(USTACK - ns*PAGESIZ); /* stack pages (high slots) */
+        ns = u.u_procp->p_size - 1 - u.u_procp->p_dsize;
+        u.u_base = (char *)((UDPAGES - ns)*PAGESIZ); /* stack pages (high slots) */
         u.u_count = ns * PAGESIZ;
         u.u_segflg = 0;
         writei(ip);
@@ -228,8 +216,9 @@ int core(void)
  * pages (the x86 page stands in for the PDP-11 click, so
  * V6's negative stack addresses become offsets below USTACK
  * and SINCR is subsumed by the page rounding).  The stack
- * page count is p_size - p_dsize; expand updates p_size, so
- * V6's u_ssize bookkeeping has no counterpart here.
+ * page count is p->p_ssize (grow updates it); keeping the stack extent in the
+ * proc entry rather than deriving it from p_size means sureg maps the real
+ * stack even while swgrow has transiently inflated p_size.
  */
 int grow(unsigned sp)
 {
@@ -240,14 +229,16 @@ int grow(unsigned sp)
 
     p = u.u_procp;
     nd = p->p_dsize;
-    ns = p->p_size - nd;
-    if(sp >= (unsigned)USTACK - (unsigned)ns*PAGESIZ)
+    ns = p->p_size - 1 - nd;
+    if(sp >= (unsigned)((UDPAGES - ns)*PAGESIZ))
         return(0);
-    si = USTACK/PAGESIZ - (int)(sp/PAGESIZ) - ns;
+    si = UDPAGES - (int)(sp/PAGESIZ) - ns;
     if(si <= 0)
         return(0);
     if(estabur(p->p_tsize, nd, ns+si, 1))
         return(0);
+    p->p_ssize = ns + si;       /* new stack extent; set before expand so both its
+                                 * in-core and no-core (swap-in) paths install it */
     expand(p->p_size+si);
     a = p->p_addr + p->p_size;
     for(i=ns; i; i--) {

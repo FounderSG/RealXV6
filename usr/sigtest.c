@@ -30,7 +30,7 @@ int main(int argc, char* argv[])
             printf("Parent: SIGINT Sent failed.\n");
 
         r = waits(&status);
-        printf("Parent: child exit code %d, wait returns %d.\n", status, r);
+        printf("Parent: child exit code %d, wait returns %d.\n", (status >> 8) & 0377, r);
     }
 
     return 1;

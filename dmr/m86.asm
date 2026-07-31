@@ -42,7 +42,7 @@ STARTX          PROC    NEAR
     add     sp, 14          ; restore entry stack
 
     mov     ax, U_AREA
-    add     ax, 1020
+    add     ax, 4092
     mov     sp, ax
 
 ; Reset uninitialized data area
@@ -57,7 +57,7 @@ STARTX          PROC    NEAR
 ; Nothing is pushed yet and rep stosb does not touch the stack.
     xor     ax, ax
     mov     di, U_AREA
-    mov     cx, 0400h
+    mov     cx, 1000h
     rep     stosb
 
 ; Call main function
@@ -98,7 +98,7 @@ SwitchToKernelStack MACRO
     mov ax, cs
     mov ss, ax
     mov ax, U_AREA
-    add ax, 1024
+    add ax, 4096
     mov sp, ax
     push dx
     push cx
@@ -350,12 +350,12 @@ _bios_putc  endp
 ; Entered via VMM iretd on the KERNEL stack (the user SP may be inside the
 ; not-present stack gap, so it cannot be used).  SS = GUEST_CS, DS/ES and the
 ; GP registers hold the faulting user state, IF=0, VM=1.  The VMM pushed, at
-; the top of the u-area kernel stack (growing down from 0xD400):
-;   0xD3F4 ip  0xD3F6 cs  0xD3F8 flags   (user iret frame; SP enters here)
-;   0xD3FA fault_off  0xD3FC user_sp  0xD3FE user_ss
+; the top of the u-area kernel stack (growing down from 0xE000):
+;   0xDFF4 ip  0xDFF6 cs  0xDFF8 flags   (user iret frame; SP enters here)
+;   0xDFFA fault_off  0xDFFC user_sp  0xDFFE user_ss
 ; EnterISR completes a struct ctx below the iret frame; segflt() grows the
 ; stack (restart) or posts SIGSEG, leaving the return SS:SP in
-; u_stack[KSSIZE-1:-2] and a ctx to IRET through on the user stack.
+; uret_ss/uret_sp and a ctx to IRET through on the user stack.
 _segflt_isr     proc    near
     EnterISR                        ; push bp,si,di,ax,bx,cx,dx,es,ds; ds=cs
     mov     bp, sp                  ; bp -> ctx (ds@0..bp@16, ip@18,cs@20,flag@22,
@@ -365,9 +365,9 @@ _segflt_isr     proc    near
     push    word ptr [bp+26]        ; user_sp
     push    word ptr [bp+24]        ; fault_off
     call    near ptr _segflt        ; segflt(fault_off, user_sp, user_ss, kctx)
-    ; segflt set u_stack[KSSIZE-1:-2] = return ss:sp; IRET back through it.
-    mov     sp, U_AREA + 1024 - 4   ; -> u_stack[KSSIZE-2] slot (0xD3FC)
-    SwitchToUserStack               ; ss:sp = u_stack[KSSIZE-1:-2]
+    ; segflt set uret_ss/uret_sp = return ss:sp; IRET back through it.
+    mov     sp, U_AREA + 4096 - 4   ; -> uret_sp slot (0xDFFC)
+    SwitchToUserStack               ; ss:sp = uret_ss:uret_sp
     ExitISR                         ; pop ctx regs; iret to user
 _segflt_isr     endp
 

@@ -31,7 +31,7 @@ BINS = init.aout sh.aout ls.aout cat.aout wc.aout echo.aout pwd.aout kill.aout d
 BINS += rm.aout login.aout cp.aout chmod.aout mkdir.aout sync.aout id.aout zombie.aout
 BINS += mount.aout umount.aout forktest.aout sigtest.aout stty.aout more.aout fib.aout
 BINS += ln.aout nice.aout mknod.aout sleep.aout grep.aout ps.aout ed.aout
-BINS += mkfs.aout
+BINS += mkfs.aout df.aout
 
 all : .symbolic clean unix.lib startup.obj $(BINS)
 

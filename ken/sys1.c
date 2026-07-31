@@ -16,8 +16,8 @@ void exec(void)
     int ap, na, nc;
     int ts, tp;
     int entry, csb, dsb, ustktop;
-    int nblk, ndata, nstack;
-    uint da;
+    int nblk, ndata, nstack, olds;
+    uint da, olda, oldu;
     struct text *oldtp, *newtp;
     long foff;
     struct exec hdr;
@@ -90,9 +90,8 @@ void exec(void)
          * WIN_DATA (DS=ES=SS=WDSEG), and the u-area lives in its own page
          * (WIN_U) outside both windows.  The data segment is laid out, low to
          * high, as [ data ][ bss ][ gap ][ stack ] with SP pinned at USTACK.
-         * The data block is fixed at USTACK/PAGESIZ pages and contiguous, so it
-         * maps 1:1 through WIN_DATA (slot N -> physical p_addr+N) and the user
-         * stack / SP holder sit at the fixed offset USTACK-2 (0xEFFE) -- where
+         * The data segment spans up to UDPAGES pages, and the user
+         * stack / SP holder sit at the fixed offset USTACK-2 (0xFFFC) -- where
          * ps finds them via flat /dev/mem, no window awareness needed.  The
          * code segment is attached through the shared text table (xalloc);
          * both the data block and the text attach happen before anything is
@@ -102,20 +101,20 @@ void exec(void)
             u.u_error = ETXTBSY;            /* file is open for writing (V6) */
             goto bad;
         }
-        ndata = ((unsigned)hdr.a_data + (unsigned)hdr.a_bss) / PAGESIZ;
-        if(((unsigned)hdr.a_data + (unsigned)hdr.a_bss) % PAGESIZ)
+        ndata = (hdr.a_data + hdr.a_bss) / PAGESIZ;
+        if((hdr.a_data + hdr.a_bss) % PAGESIZ)
             ndata++;                        /* data+bss page count (low slots) */
-        nstack = (unsigned)hdr.a_stack / PAGESIZ;
-        if((unsigned)hdr.a_stack % PAGESIZ)
+        nstack = hdr.a_stack / PAGESIZ;
+        if(hdr.a_stack % PAGESIZ)
             nstack++;                       /* stack page count (high slots) */
-        nblk = ndata + nstack;             /* compact: data + stack; heap gap unmapped */
-        if((unsigned)hdr.a_text == 0) {
+        nblk = 1 + ndata + nstack;         /* u (slot 0) + data + stack; heap gap unmapped */
+        if(hdr.a_text == 0) {
             u.u_error = ENOEXEC;            /* an EXE with no text cannot run; also
                                              * keeps p_tsize!=0 <=> p_textp!=NULL */
             goto bad;
         }
-        tp = (unsigned)hdr.a_text / PAGESIZ;
-        if((unsigned)hdr.a_text % PAGESIZ)
+        tp = hdr.a_text / PAGESIZ;
+        if(hdr.a_text % PAGESIZ)
             tp++;                           /* text page count */
         if(estabur(tp, ndata, nstack, 1))   /* try the sizes out (V6) */
             goto bad;
@@ -136,20 +135,14 @@ void exec(void)
 
         /*
          * Commit.  Both new blocks are allocated, so freeing the old image now
-         * cannot overlap them.  On a single-seg -> EXE transition, RETAIN the
-         * old block's page USIZE-1 in place as the EXE u-area's own page: it is
-         * the live u-area / kernel stack (windowed at 0xD000), so keeping it
-         * put means no copy and no live window remap -- the window already maps
-         * 0xD000 there.  A live sureg call here is fatal: its return address
-         * would be pushed on the old page but popped from the new one.
-         * Only the other (data) pages of the old block are freed.
+         * cannot overlap them.  Capture the old-image coordinates first: they
+         * are read after uswitch (which continues on the migrated u-page), so
+         * they must be set before save() and left untouched afterward -- they
+         * ride the copy of the u-page's stack frame.
          */
-        if(u.u_procp->p_tsize == 0) {      /* single-seg block is USIZE pages */
-            u.u_procp->p_uaddr = u.u_procp->p_addr + (USIZE-1);
-            mfree(coremap, USIZE-1, u.u_procp->p_addr);
-        } else {                           /* already EXE: keep its u-page, drop old data */
-            mfree(coremap, u.u_procp->p_size, u.u_procp->p_addr);
-        }
+        olda = u.u_procp->p_addr;
+        olds = u.u_procp->p_tsize ? u.u_procp->p_size : USIZE;
+        oldu = UPAGE(u.u_procp);
         /*
          * Release the reference to the old text.  V6 exec calls xfree()
          * BEFORE xalloc(); it is deferred to the commit point here so a
@@ -167,19 +160,30 @@ void exec(void)
         u.u_procp->p_addr  = da;
         u.u_procp->p_size  = nblk;
         u.u_procp->p_dsize = ndata;
+        u.u_procp->p_ssize = nstack;       /* stack extent for sureg */
 
-        for(c=0; c<nblk; c++)              /* clear data+bss+stack */
+        for(c=1; c<nblk; c++)              /* clear data+bss+stack; slot 0 = u */
             clearseg(da+c);
         /* the code block was cleared and loaded by xalloc; clearing it
          * here would wipe a segment other processes share */
 
-        /* Install the new image's windows (estabur ends in sureg, as V6).
-         * sureg remaps WIN_U to the same page it already maps (p_uaddr is
-         * the unchanged u-area page), so this is safe even with the kernel
-         * stack live in that page. */
-        estabur(tp, ndata, nstack, 1);
+        /*
+         * Migrate the live u-area into the new block's slot 0, then switch
+         * WIN_U to it.  save() before the copy so the copy carries this
+         * context; uswitch runs the remap off the u-page and continues below
+         * on the new page.  Nothing may write u or sleep between the copy and
+         * uswitch: the new image's u fields are all set further down, after
+         * the switch.  uswitch's retu(=sureg) installs the new windows, so no
+         * separate estabur is needed here.
+         */
+        if(save(u.u_rsav) == 0) {
+            copyseg(oldu, da);
+            uswitch(u.u_procp, u.u_rsav);
+            /* no return */
+        }
+        mfree(coremap, olds, olda);        /* free the whole old block (incl old u) */
 
-        foff = (long)sizeof(hdr) + (unsigned)hdr.a_text;
+        foff = (long)sizeof(hdr) + hdr.a_text;
         u.u_base = (char *)0;              /* load data at DS:0 */
         u.u_offset[0] = (int)(foff >> 16);
         u.u_offset[1] = (int)foff;
@@ -189,7 +193,7 @@ void exec(void)
         csb = WINSEG;
         dsb = WDSEG;
         entry = hdr.a_entry;
-        ustktop = USTACK;                  /* SP holder at USTACK-2 (0xEFFE), fixed for ps */
+        ustktop = USTACK;                  /* SP holder at USTACK-2 (0xFFFC), fixed for ps */
     } else {
         u.u_error = ENOEXEC;
         goto bad;
@@ -223,8 +227,8 @@ void exec(void)
     suword(ts + 18, entry);       /* ip */
     suword(ts + 20, csb);         /* cs */
     suword(ts + 22, 0x200);       /* flag */
-    u.u_stack[KSSIZE - 1] = dsb;  /* ss */
-    u.u_stack[KSSIZE - 2] = ts;   /* sp */
+    uret_ss = dsb;                /* ss */
+    uret_sp = ts;                 /* sp */
 
     /*
      * set SUID/SGID protections, if no tracing
@@ -261,7 +265,7 @@ bad:
  */
 void rexit(void)
 {
-    u.u_arg[0] = u.u_ar0[R0];
+    u.u_arg[0] = u.u_ar0[R0] << 8;
     exit();
 }
 
@@ -295,13 +299,11 @@ void exit(void)
     bcopy(&u, bp->b_addr, 256);
     bwrite(bp);
     q = u.u_procp;
-    mfree(coremap, q->p_size, q->p_addr);
-    mfree(coremap, 1, q->p_uaddr);  /* the private u-page; the shared code
-                                     * segment was released by xfree above */
+    mfree(coremap, q->p_size, q->p_addr);  /* whole block incl the u page (slot 0);
+                                            * the shared code was released by xfree */
     q->p_tsize = 0;                 /* psinfo/ps key on p_tsize: a zombie must
                                      * not present a stale argument frame */
     q->p_taddr = 0;
-    q->p_uaddr = 0;
     q->p_addr = a;
     q->p_stat = SZOMB;
 
@@ -438,7 +440,7 @@ void sbreak(void)
     if((uint)u.u_arg[0] % PAGESIZ)
         nd++;
     d = nd - p->p_dsize;
-    ns = p->p_size - p->p_dsize;
+    ns = p->p_size - 1 - p->p_dsize;
     if(estabur(p->p_tsize, nd, ns, 1))      /* validate the new sizes (V6) */
         return;
     p->p_dsize = nd;
@@ -449,13 +451,13 @@ void sbreak(void)
      * Shrinking (d <= 0): slide the stack pages down into the freed data
      * space, then release the tail.
      */
-    a = p->p_addr + nd;                     /* new stack base */
+    a = p->p_addr + 1 + nd;                 /* new stack base (slot 0 = u) */
     n = ns;
     while(n--) {
         copyseg(a - d, a);                  /* d<=0: a-d = a+|d| is the old page */
         a++;
     }
-    expand(nd + ns);                        /* shrink: frees the tail */
+    expand(1 + nd + ns);                    /* shrink: frees the tail */
     estabur(p->p_tsize, nd, ns, 1);         /* install the new window map */
     return;
 
@@ -464,7 +466,7 @@ bigger:
      * Growing (d > 0): enlarge the block, slide the stack pages up, then clear
      * the d new data pages exposed below the stack.
      */
-    expand(nd + ns);
+    expand(1 + nd + ns);
     a = p->p_addr + p->p_size;              /* top of the new block */
     n = ns;
     while(n--) {

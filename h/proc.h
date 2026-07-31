@@ -16,19 +16,29 @@ struct  proc
     char    p_time;     /* resident time for scheduling */
     char    p_cpu;      /* cpu usage for scheduling */
     char    p_nice;     /* nice for scheduling */
-    int     p_ttyp;     /* controlling tty */
+    struct tty *p_ttyp; /* controlling tty */
     int     p_pid;      /* unique process id */
     int     p_ppid;     /* process id of parent */
-    int     p_addr;     /* address of swappable image (data block for EXE) */
-    int     p_size;     /* size of swappable image (*64 bytes) */
+    int     p_addr;     /* swappable image base page; EXE block = [u][data][stack] */
+    int     p_size;     /* size of swappable image in pages; includes the u page */
     int     p_taddr;    /* EXE code segment base page; 0 = single-segment */
     int     p_tsize;    /* EXE code segment size in pages; 0 = single-segment */
-    int     p_uaddr;    /* EXE u-area own page; single-seg uses p_addr+USIZE-1 */
-    int     p_dsize;    /* EXE data+bss page count; stack pages = p_size - p_dsize */
+    int     p_dsize;    /* EXE data+bss page count (low window slots) */
+    int     p_ssize;    /* EXE stack page count (high window slots); the V6 u_ssize,
+                         * kept here with tsize/dsize so sureg reads all three sizes
+                         * from proc -- decoupled from p_size, which swgrow may
+                         * transiently inflate as a swap reservation */
     int     p_wchan;    /* event process is awaiting */
     struct text *p_textp;   /* pointer to text structure */
 };
 extern struct proc proc[NPROC];
+
+/*
+ * Physical page of the process's u-area / kernel stack: for an EXE process it
+ * is slot 0 of the swappable block; a single-seg process keeps it at the top
+ * of its USIZE-page block (p_addr + USIZE - 1).
+ */
+#define UPAGE(p) ((p)->p_tsize ? (p)->p_addr : (p)->p_addr + USIZE - 1)
 
 /* stat codes */
 #define SSLEEP  1       /* sleeping on high priority */

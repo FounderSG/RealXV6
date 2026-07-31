@@ -39,16 +39,6 @@ void nullsys(void)
 {
 }
 
-void trap_epilogue(void)
-{
-    struct ctx far *ctx;
-    ctx = (struct ctx far *)MK_FP(u.u_stack[KSSIZE - 1], u.u_stack[KSSIZE - 2]);
-    ctx->ax = u.u_ar0[R0];
-    ctx->bx = u.u_ar0[R1];
-    ctx->cx = u.u_ar0[R2];
-    ctx->dx = u.u_ar0[R3];
-}
-
 void trap(void)
 {
     register struct sysent *callp;
@@ -68,52 +58,6 @@ void trap(void)
     if(issig())
         psig();
     setpri(u.u_procp);
-}
-
-void trap0(int ds, int es, int dx, int cx, int bx, int ax,
-    int di, int si, int bp, int ip, int cs, int flags,
-    int arg0, int arg1, int arg2)
-{
-    (void)es; (void)ds; (void)si; (void)di; (void)bp;
-    (void)ip; (void)cs; (void)flags;
-
-    u.u_ar0[R0] = ax;
-    u.u_ar0[R1] = bx;
-    u.u_ar0[R2] = cx;
-    u.u_ar0[R3] = dx;
-    u.u_arg[0] = arg0;
-    u.u_arg[1] = arg1;
-    u.u_arg[2] = arg2;
-    u.u_dirp = u.u_arg[0];
-    u.u_error = 0;
-}
-
-/*
- * The VMM u-area window is exactly one page; the kernel stack lives at its
- * top (U_AREA + 1024 = 0xD400).  segflt/psig/trap_epilogue depend on that
- * layout, so pin the size at compile time.
- */
-typedef char user_size_assert[sizeof(struct user) == 0x400 ? 1 : -1];
-
-/*
- * Copy the faulting 12-word interrupt frame (struct ctx) that _segflt_isr
- * built on the kernel stack down onto the user stack at usp-24, and point the
- * return SS:SP (u_stack[KSSIZE-1:-2]) at it.  On return _segflt_isr reloads
- * that SS:SP and IRETs through the frame: for a restart this re-runs the
- * faulting instruction; for a caught signal psig() first duplicates the frame
- * once more and vectors the trampoline.  Both need the frame on the user
- * stack because a V86 IRET does not reload SS:SP.
- */
-static void dupframe(unsigned kctx, unsigned uss, unsigned usp)
-{
-    int far *dst = (int far *)MK_FP(uss, usp - 24);
-    int *src = (int *)kctx;            /* near: the ctx in the u page (DS-relative) */
-    int i;
-
-    for(i = 0; i < 12; i++)
-        dst[i] = src[i];
-    u.u_stack[KSSIZE - 1] = uss;
-    u.u_stack[KSSIZE - 2] = usp - 24;
 }
 
 /*

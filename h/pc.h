@@ -2,8 +2,6 @@
 #define _PC_H       1
 
 #define NULL        0
-#define min(a,b)    ((a)<(b)?(a):(b))
-#define max(a,b)    ((a)<(b)?(b):(a))
 
 #define FP_OFF(__p) ((unsigned)(__p))
 #define FP_SEG(__p) ((unsigned)((unsigned long)(void __far*)(__p) >> 16))

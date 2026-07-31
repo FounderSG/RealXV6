@@ -8,7 +8,7 @@
 #include "filsys.h"
 #include "file.h"
 #include "user.h"
+#include "tty.h"
 #include "proc.h"
 #include "exec.h"
-#include "tty.h"
 #include "systm.h"

@@ -108,7 +108,7 @@ struct tss_full {
 #define HVC_SEGFLT_SETUP  0x07  /* register _segflt_isr: BX = near IP in kernel CS */
 
 /* Linear base of the WIN_U window (pt0[0x1D]).  The guest reaches its u-area
- * (and the kernel stack at its top, 0xD400) via GUEST_CS:0xD000..0xDFFF, which
+ * (and the kernel stack at its top, 0xE000) via GUEST_CS:0xD000..0xDFFF, which
  * maps to linear 0x1D000; the VMM reaches the same physical page here. */
 #define WIN_U_LINEAR   0x1D000u
 

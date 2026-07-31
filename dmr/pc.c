@@ -52,10 +52,13 @@ void sureg(struct proc *p)
          * as exec's I-space load cursor. */
         desc.taddr = p->p_textp != NULL ? p->p_textp->x_caddr : p->p_taddr;
         desc.tsize = p->p_tsize;
-        desc.daddr = p->p_addr;
+        desc.daddr = p->p_addr + 1;             /* data starts at slot 1 (slot 0 = u) */
         desc.dsize = p->p_dsize;
-        desc.ssize = p->p_size - p->p_dsize;
-        desc.uaddr = p->p_uaddr;
+        desc.ssize = p->p_ssize;                /* real stack pages, NOT p_size-1-p_dsize:
+                                                 * swgrow transiently inflates p_size as a
+                                                 * swap reservation, which must not reach
+                                                 * the 15-slot WIN_DATA window */
+        desc.uaddr = p->p_addr;                 /* u = block slot 0 */
         desc.mode  = 1;
         user_dseg  = WDSEG;
     } else {
@@ -74,6 +77,48 @@ void sureg(struct proc *p)
 void retu(struct proc *p)
 {
     sureg(p);
+}
+
+/* external helper function defined in asm code */
+extern void use_resume_stack(void);
+extern void do_resume(label_t ctx);
+struct proc *resume_proc;
+int *resume_ctx;
+void resume(struct proc *p, label_t ctx)
+{
+    resume_proc = p;
+    resume_ctx = ctx;
+    use_resume_stack();
+
+    if(resume_proc != u.u_procp)
+    {
+        if(u.u_procp->p_stat != SZOMB)
+            savu(u.u_procp);
+        retu(resume_proc);
+    }
+    do_resume(resume_ctx);
+}
+
+/*
+ * Switch to p's (possibly relocated) u-page and continue at ctx.  The x86
+ * counterpart of V6 retu(): run the window remap on the dedicated resume
+ * stack (so no live stack sits in the u-page during the remap), then reload
+ * SP/BP from ctx.  Never returns.  ctx must have been captured with save()
+ * BEFORE the u-page was copied, so the copy carries it; ctx is a near address
+ * inside the u window, so do_resume dereferences it only after the remap and
+ * reads the new page (as swtch's "interpreted in the new address space").
+ *
+ * Unlike resume(), there is no "same proc" fast-path skip: expand()/exec()
+ * keep the same proc but move its u to a new physical page, which must always
+ * be remapped.
+ */
+void uswitch(struct proc *p, label_t ctx)
+{
+    resume_proc = p;
+    resume_ctx = ctx;
+    use_resume_stack();
+    retu(resume_proc);
+    do_resume(resume_ctx);
 }
 
 void spl0(void)
@@ -166,6 +211,11 @@ void copyout(uint srcAddr, uint dstAddr, int iSize)
     memcpy(MK_FP(user_dseg, dstAddr), MK_FP(core_cs, srcAddr), iSize);
 }
 
+void copyin(uint srcAddr, uint dstAddr, int iSize)
+{
+    memcpy(MK_FP(core_cs, dstAddr), MK_FP(user_dseg, srcAddr), iSize);
+}
+
 typedef union {
     long i32;
     struct { int lo; int hi; } i16;
@@ -249,7 +299,7 @@ void idle(void)
     _asm cli
 }
 
-void putck(char c)
+void putchar(char c)
 { 
 #if defined(KL_BACKEND_UART)
     uart_putc(c);
@@ -283,6 +333,109 @@ void PC_SetTickRate(void)
     outportb(TICK_T0_8254_CWR,  TICK_T0_8254_CTR0_MODE3); /* Load the 8254 with desired frequency          */
     outportb(TICK_T0_8254_CTR0, count & 0xFF);            /* Low  byte                                     */
     outportb(TICK_T0_8254_CTR0, (count >> 8) & 0xFF);     /* High byte                                     */
+}
+
+void isr_savuar(int ds, int es, int dx, int cx, int bx, int ax,
+    int di, int si, int bp, int ip, int cs, int flags)
+{
+    (void)es; (void)ds; (void)si; (void)di; (void)bp;
+    (void)ip; (void)cs; (void)flags;
+
+    u.u_ar0[R0] = ax;
+    u.u_ar0[R1] = bx;
+    u.u_ar0[R2] = cx;
+    u.u_ar0[R3] = dx;
+}
+
+void isr_router(int irq, int mode)
+{
+    switch(irq)
+    {
+        case 0: clock(mode); break;
+        case 1: ideintr(); break;
+        case 2: kbdintr(); break;
+        case 3: uartintr(); break;
+    }
+}
+
+void check_runrun(void)
+{
+loop:
+    spl7();
+    if(runrun == 0)
+    {
+        return;
+    }
+    spl0();
+    swtch();
+    goto loop;
+}
+
+void trap0(int ds, int es, int dx, int cx, int bx, int ax,
+    int di, int si, int bp, int ip, int cs, int flags,
+    int arg0, int arg1, int arg2)
+{
+    (void)es; (void)ds; (void)si; (void)di; (void)bp;
+    (void)ip; (void)cs; (void)flags;
+
+    u.u_ar0[R0] = ax;
+    u.u_ar0[R1] = bx;
+    u.u_ar0[R2] = cx;
+    u.u_ar0[R3] = dx;
+    u.u_arg[0] = arg0;
+    u.u_arg[1] = arg1;
+    u.u_arg[2] = arg2;
+    u.u_dirp = u.u_arg[0];
+    u.u_error = 0;
+}
+
+void trap_epilogue(void)
+{
+    struct ctx far *ctx;
+    ctx = (struct ctx far *)MK_FP(uret_ss, uret_sp);
+    ctx->ax = u.u_ar0[R0];
+    ctx->bx = u.u_ar0[R1];
+    ctx->cx = u.u_ar0[R2];
+    ctx->dx = u.u_ar0[R3];
+}
+
+/*
+ * Copy the faulting 12-word interrupt frame (struct ctx) that _segflt_isr
+ * built on the kernel stack down onto the user stack at usp-24, and point the
+ * return SS:SP (uret_ss/uret_sp) at it.  On return _segflt_isr reloads
+ * that SS:SP and IRETs through the frame: for a restart this re-runs the
+ * faulting instruction; for a caught signal psig() first duplicates the frame
+ * once more and vectors the trampoline.  Both need the frame on the user
+ * stack because a V86 IRET does not reload SS:SP.
+ */
+void dupframe(unsigned kctx, unsigned uss, unsigned usp)
+{
+    int far *dst = (int far *)MK_FP(uss, usp - 24);
+    int *src = (int *)kctx;            /* near: the ctx in the u page (DS-relative) */
+    int i;
+
+    for(i = 0; i < 12; i++)
+        dst[i] = src[i];
+    uret_ss = uss;
+    uret_sp = usp - 24;
+}
+
+void sendsig(int p)
+{
+    int far *ustack;
+    struct ctx far *ctx;
+
+    uret_sp -= 24;                /* duplicate interrupt stack frame */
+    ustack = (int far *)MK_FP(uret_ss, uret_sp);
+    memcpy(ustack, &ustack[12], 24);
+    ctx = (struct ctx far *)ustack;
+    ctx->ip = SIGTRAMP_EXE;
+    ctx->si = p;
+    ctx = (struct ctx far *)&ustack[12];
+    /* ip, cs, flag = ax, flag, return address */
+    ctx->cs = ctx->flag;
+    ctx->flag = ctx->ip;
+    ctx->ip = ctx->ax;
 }
 
 #define PC_CLOCK_INTR   8

@@ -15,10 +15,10 @@
 
 struct psbuf {
 	struct proc pr;
-	char stk[512];          /* image of virtual [USTACK-512, USTACK) */
+	char stk[512];          /* arg-frame image: top 512-block of the stack page */
 } info;
 
-#define SBASE (USTACK - 512)    /* virtual address that maps to stk[0] */
+#define SBASE ((USTACK-2) & ~0x1FF)  /* base of SP's 512-block = virtual addr of stk[0] */
 
 void prcom(void);
 

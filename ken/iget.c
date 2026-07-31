@@ -50,7 +50,7 @@ loop:
             ip = p;
     }
     if((p=ip) == NULL) {
-        printk("Inode table overflow\n");
+        printf("Inode table overflow\n");
         u.u_error = ENFILE;
         return(NULL);
     }
