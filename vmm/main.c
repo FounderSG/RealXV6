@@ -7,7 +7,125 @@
 static struct idt_entry idt[256]   = { 0 };
 static struct dtr       idtr       = { 0, 0 };
 static struct tss_full  tss0       = { 0 };
-static u16              g_segflt_isr_ip = 0;   /* _segflt_isr offset, set by HVC_SEGFLT_SETUP */
+static u16              g_segflt_isr_ip  = 0;  /* _segflt_isr offset, set by HVC_SEGFLT_SETUP */
+static u16              g_privflt_isr_ip = 0;  /* _privflt_isr offset, set by HVC_PRIVFLT_SETUP */
+static u16              g_kfault_ip      = 0;  /* kfault offset, set by HVC_NOFAULT_SETUP */
+static u32              g_nofault_addr   = 0;  /* linear addr of the guest `nofault` flag */
+
+/* Post-mortem dump; defined below but called earlier (hyper_dispatch, #PF). */
+static void dump_state(struct trap_frame *tf, const char *why);
+
+/* --------------------------------------------------------------------------
+ * Mode bit (the PDP-11 PSW current-mode analog).  g_kmode == 1 iff the guest
+ * kernel -- or BIOS code invoked by the kernel -- is executing; == 0 iff a
+ * guest *user* process is executing.  The CPU treats kernel and user V86 code
+ * identically (both CPL 3), so this software bit is what lets the VMM apply
+ * different policy to the two: user-mode privileged ops become signals, the
+ * kernel's are honored.
+ *
+ * Boot starts in the guest kernel (STARTX), so g_kmode = 1.  guest_test.com
+ * never leaves kmode, so q-test is unaffected by any of this.
+ *
+ * enter_kmode() is invoked on every path that vectors the guest onto a kernel
+ * handler (hardware IRQ inject, INT reflect, user #PF, privflt); URET (int 82h)
+ * is the sole path back to user (sets g_kmode = 0).
+ * ------------------------------------------------------------------------ */
+static u8 g_kmode = 1;
+
+static void enter_kmode(void)
+{
+    g_kmode = 1;
+    /* The hardware consequences of the mode (I/O bitmap and page directory) are
+     * applied once at the VMM exit sync, keyed off the final g_kmode -- see
+     * trap_dispatch. */
+}
+
+/* --------------------------------------------------------------------------
+ * Virtual PDP-11 processor priority (graded SPL).  g_spl (0-7) is the
+ * VMM's shadow of the guest's PS priority; the live EFLAGS never carries it
+ * (V86_FLAGS_MASK forces bits 12-14 to 0), so the priority lives ONLY in
+ * g_spl and in the bits-12-14 field of stack flag images.  A device IRQ is
+ * delivered iff the guest IF is set AND the device's bus-request level exceeds
+ * the current priority (dev_pri > g_spl) -- the PDP-11 grant condition.  Device
+ * priorities copy the V6 hardware: KW11-L clock BR6, RK11 disk BR5, KL11
+ * console BR4.  User mode always runs at priority 0 (set by URET).
+ * ------------------------------------------------------------------------ */
+static u8 g_spl = 0;
+
+#define PIT_PRI  6      /* KW11-L line clock  (master IRQ0) */
+#define IDE_PRI  5      /* RK11 disk          (slave  IRQ6) */
+#define KBD_PRI  4      /* KL11 console       (master IRQ1) */
+
+/* I/O permission bitmap base values written to tss0.base.iomap_base at the exit
+ * sync.  ALLOW points the base at tss0.iomap (an all-zero 128-byte map -> guest
+ * ports 0..0x3FF permitted, so the kernel's disk PIO runs natively at full
+ * speed).  DENY sets the base beyond the TSS limit, so EVERY guest IN/OUT #GPs
+ * and the umode whitelist turns it into SIGINS.  The CPU re-reads the base on
+ * each I/O permission check, so a plain store takes effect on the next V86
+ * instruction -- no LTR reload. */
+#define IOMAP_ALLOW  ((u16)((u8 *)&tss0.iomap - (u8 *)&tss0))
+#define IOMAP_DENY   ((u16)sizeof(tss0))
+
+/* Physical page-table roots (the KISA/UISA analog).  PD_k/PT0_k are built by
+ * entry.asm: identity map 0-4MB plus the kernel's WIN_TEXT/WIN_DATA/WIN_U
+ * windows -- the kernel keeps full reach.  PD_u/PT0_u are built here in
+ * vmm_main and rebuilt by every HVC_SUREG so the USER view maps ONLY the
+ * running process's own text/data/stack (plus the VMM's supervisor pages, U=0,
+ * so ring-0 traps can still be delivered while CR3=PD_u).  A V86 user process
+ * is thereby confined to its own address space. */
+#define PD_K_PHYS   0x2000u
+#define PT0_K_PHYS  0x3000u
+#define PD_U_PHYS   0x4000u
+#define PT0_U_PHYS  0x5000u
+
+/* mode field (0 = single-seg icode, 1 = EXE) of the most recent HVC_SUREG.  The
+ * #PF stack-growth branch is gated on ==1, so a mode=0 process forging
+ * DS=0xD000 cannot trip a bogus grow(). */
+static u16 g_sureg_mode = 0;
+
+/* Rebuild PT0_u (the user page-table view) from scratch: clear all 1024 PTEs,
+ * lay in the VMM's own supervisor pages (U=0) so ring-0 trap delivery keeps
+ * working while CR3=PD_u, then map the current process's windows (U=1).  Called
+ * from vmm_main (initial) and from every HVC_SUREG (a mode=0/1 process image).
+ * Rebuilding wholesale avoids stale-entry bugs when a range moves. */
+static void build_pt0u(u16 taddr, u16 tsize, u16 daddr, u16 dsize, u16 ssize, u16 mode)
+{
+    u32 *pt0u = (u32 *)PT0_U_PHYS;
+    u32  k;
+
+    for (k = 0; k < 1024; k++)
+        pt0u[k] = 0;
+
+    /* VMM infrastructure, identity-mapped SUPERVISOR (U=0): the CPU reads the
+     * IDT/GDT/TSS/handlers (vmm.bin, pages 0x08-0x0B) and pushes the ring-0
+     * trap frame (page 0x0F, esp0=0xFFFE) while CR3=PD_u.  U=0 makes them
+     * present for trap delivery yet untouchable from V86 CPL 3 -- the one place
+     * the U/S bit separates the VMM from the guest (never guest kernel from
+     * guest user; both are CPL 3). */
+    pt0u[0x08] = 0x08000u | 0x3u;
+    pt0u[0x09] = 0x09000u | 0x3u;
+    pt0u[0x0A] = 0x0A000u | 0x3u;
+    pt0u[0x0B] = 0x0B000u | 0x3u;
+    pt0u[0x0F] = 0x0F000u | 0x3u;
+
+    if (mode == 1) {
+        /* EXE: WIN_TEXT (0xA0..) RO user (0x5), sparse WIN_DATA (0xD0..) RW
+         * user (0x7) -- mirroring the kernel view, but with NO 0x1D entry: the
+         * u-area / kernel stack is invisible to user, as in V6. */
+        for (k = 0; k < tsize; k++)
+            pt0u[0xA0 + k] = ((u32)(taddr + k) << 12) | 0x5u;
+        for (k = 0; k < dsize; k++)
+            pt0u[0xD0 + k] = ((u32)(daddr + k) << 12) | 0x7u;
+        for (k = 0; k < ssize; k++)
+            pt0u[0xD0 + (16 - ssize) + k] = ((u32)(daddr + dsize + k) << 12) | 0x7u;
+    } else {
+        /* mode=0 (icode): identity-map the process block RW user, EXCLUDING the
+         * u-page (sureg passes dsize = USIZE-1).  dsize == 0 (proc[0]'s STARTX
+         * descriptor, which never enters user mode) leaves only the VMM pages. */
+        for (k = 0; k < dsize; k++)
+            pt0u[daddr + k] = ((u32)(daddr + k) << 12) | 0x7u;
+    }
+}
 
 /* Bootsect loads vmm.bin + unix.com together at phys 0x08000:
  *   0x08000..0x0BFFF  vmm.bin  (sectors 1..32, ~16 KB budget)
@@ -133,12 +251,19 @@ static void tss_init(void)
  *               For 'int n' software interrupts: tf->eip + 2 (past CD vec).
  *               For hardware IRQs:               tf->eip (the next instr).
  * ------------------------------------------------------------------------ */
-static void inject_v86(struct trap_frame *tf, u8 guest_vec, u16 return_ip)
+/* new_spl: the priority to adopt (PDP-11 "new PS from the interrupt vector")
+ * for a hardware IRQ, or -1 for a software INT reflection (leave g_spl). */
+static void inject_v86(struct trap_frame *tf, u8 guest_vec, u16 return_ip, int new_spl)
 {
     u16 sp, ss;
     u16 ret_cs, ret_flags;
     u16 *ivt;
     u32 stack_lin;
+
+    /* Vectoring onto an IVT handler always enters the guest kernel (this covers
+     * every hardware-IRQ delivery, deliver_pending, and reflect_int -- both the
+     * kernel's BIOS calls and a user process's int 81h syscall). */
+    enter_kmode();
 
     sp        = (u16)(tf->esp_v86 & 0xFFFF);
     ss        = (u16)(tf->ss_v86 & 0xFFFF);
@@ -146,6 +271,10 @@ static void inject_v86(struct trap_frame *tf, u8 guest_vec, u16 return_ip)
 
     ret_cs    = (u16)(tf->cs & 0xFFFF);
     ret_flags = (u16)(tf->eflags & 0xFFFF);
+    /* Stash the current virtual priority into the pushed flags image (bits
+     * 12-14), so the handler's IRET restores it; the live eflags never carries
+     * it (V86_FLAGS_MASK forces those bits to 0). */
+    ret_flags = (ret_flags & ~0x7000u) | ((u16)g_spl << 12);
 
     /* Push onto V86 stack (low->high address): flags, CS, IP */
     sp -= 2;
@@ -161,12 +290,16 @@ static void inject_v86(struct trap_frame *tf, u8 guest_vec, u16 return_ip)
     tf->cs      = ivt[1];
     tf->eip     = ivt[0];
     tf->esp_v86 = sp;
-    tf->eflags &= ~(u32)(0x100 | 0x200);    /* clear TF, IF */
+    tf->eflags &= ~(u32)(0x100 | 0x200);    /* clear TF, IF (handler at IF=0) */
+
+    /* Hardware IRQ: adopt the device's bus-request level as the new priority. */
+    if (new_spl >= 0)
+        g_spl = (u8)new_spl;
 }
 
 static void reflect_int(struct trap_frame *tf, u8 vec)
 {
-    inject_v86(tf, vec, (u16)((tf->eip + 2) & 0xFFFF));
+    inject_v86(tf, vec, (u16)((tf->eip + 2) & 0xFFFF), -1);
 }
 
 /* --------------------------------------------------------------------------
@@ -186,20 +319,29 @@ static void reflect_int(struct trap_frame *tf, u8 vec)
  * ------------------------------------------------------------------------ */
 #define P_KBD  0x01
 #define P_IDE  0x02
+#define P_PIT  0x04
 static u8 g_pending_irq = 0;
 
 static void deliver_pending(struct trap_frame *tf)
 {
-    if (!(tf->eflags & 0x200))           /* guest IF still 0: keep holding */
+    if (!(tf->eflags & 0x200))           /* guest IF still 0: keep holding all */
         return;
-    if (g_pending_irq & P_IDE) {
-        g_pending_irq &= ~P_IDE;
-        inject_v86(tf, 0x76, (u16)(tf->eip & 0xFFFF));
-        return;                          /* one at a time; ISR iret re-enables IF */
+    /* Deliver at most one held IRQ, highest bus-request level first, each gated
+     * on the graded-SPL rule (dev_pri > g_spl).  The injected handler's IRET
+     * lowers the priority and re-runs deliver_pending, draining the rest. */
+    if ((g_pending_irq & P_PIT) && PIT_PRI > g_spl) {
+        g_pending_irq &= ~P_PIT;
+        inject_v86(tf, 8, (u16)(tf->eip & 0xFFFF), PIT_PRI);
+        return;
     }
-    if (g_pending_irq & P_KBD) {
+    if ((g_pending_irq & P_IDE) && IDE_PRI > g_spl) {
+        g_pending_irq &= ~P_IDE;
+        inject_v86(tf, 0x76, (u16)(tf->eip & 0xFFFF), IDE_PRI);
+        return;
+    }
+    if ((g_pending_irq & P_KBD) && KBD_PRI > g_spl) {
         g_pending_irq &= ~P_KBD;
-        inject_v86(tf, 9, (u16)(tf->eip & 0xFFFF));
+        inject_v86(tf, 9, (u16)(tf->eip & 0xFFFF), KBD_PRI);
     }
 }
 
@@ -218,6 +360,15 @@ static void hyper_dispatch(struct trap_frame *tf)
 {
     u8 ah = (u8)((tf->eax >> 8) & 0xFF);
     u8 al = (u8)(tf->eax & 0xFF);
+
+    /* Defense in depth: hypercalls are kernel-only.  trap_dispatch already
+     * routes a user int 80h to SIGINS (never reaching here), so a !g_kmode
+     * hypercall means the mode bookkeeping is broken -- fail loud. */
+    if (!g_kmode) {
+        dump_state(tf, "hypercall from user mode");
+        for (;;)
+            ;
+    }
 
     switch (ah) {
     case HVC_NOP:
@@ -310,6 +461,12 @@ static void hyper_dispatch(struct trap_frame *tf)
                 pt0[0xD0 + (16 - ssize) + k] = ((u32)(daddr + dsize + k) << 12) | 0x7u;
         }
 
+        /* Rebuild the user page-table view to match, and record the mode for
+         * the #PF stack-growth gate.  flush_tlb below reloads PD_k (HVC_SUREG
+         * runs in kmode); the PD_u changes take effect when URET next loads it. */
+        g_sureg_mode = mode;
+        build_pt0u(taddr, tsize, daddr, dsize, ssize, mode);
+
         flush_tlb();
         tf->eax = (tf->eax & 0xFFFF0000);
         return;
@@ -317,6 +474,18 @@ static void hyper_dispatch(struct trap_frame *tf)
 
     case HVC_SEGFLT_SETUP:
         g_segflt_isr_ip = (u16)(tf->ebx & 0xFFFF);
+        tf->eax = (tf->eax & 0xFFFF0000u);
+        return;
+
+    case HVC_PRIVFLT_SETUP:
+        g_privflt_isr_ip = (u16)(tf->ebx & 0xFFFF);
+        tf->eax = (tf->eax & 0xFFFF0000u);
+        return;
+
+    case HVC_NOFAULT_SETUP:
+        g_kfault_ip = (u16)(tf->ebx & 0xFFFF);
+        /* kernel is tiny-model: DGROUP base = CS = GUEST_CS (STARTX does mov ds,cs) */
+        g_nofault_addr = ((u32)GUEST_CS << 4) + (u32)(tf->ecx & 0xFFFF);
         tf->eax = (tf->eax & 0xFFFF0000u);
         return;
 
@@ -443,6 +612,7 @@ static void check_wild_out(struct trap_frame *tf, unsigned port)
 static void pfault_trap(struct trap_frame *tf, u16 fault_off)
 {
     u16 *ktop = (u16 *)(WIN_U_LINEAR + 0x1000u);  /* just past kernel stack top (0xE000) */
+    enter_kmode();                   /* a user #PF vectors onto the kernel stack */
     ktop[-1] = (u16)tf->ss_v86;      /* 0xDFFE  user_ss */
     ktop[-2] = (u16)tf->esp_v86;     /* 0xDFFC  user_sp */
     ktop[-3] = fault_off;            /* 0xDFFA */
@@ -459,11 +629,50 @@ static void pfault_trap(struct trap_frame *tf, u16 fault_off)
 }
 
 /* --------------------------------------------------------------------------
+ * Reflect a user-mode privileged/illegal operation to the guest kernel as a
+ * trap on the kernel stack -- the SIGINS channel, the x86 stand-in for the
+ * PDP-11 illegal-instruction/BPT/EMT/IOT traps.  Frame construction is
+ * identical to pfault_trap (same kernel-stack layout at the top of WIN_U),
+ * except the word at 0xD3FA carries a trap TYPE code instead of a fault offset,
+ * and it vectors to _privflt_isr.
+ *
+ * The pushed ip is the FAULTING instruction (tf->eip is not advanced): a
+ * caught-and-returned SIGINS re-executes and re-faults, matching PDP-11
+ * re-execution semantics; the default action (core+exit) never returns anyway.
+ *
+ * Trap type codes (word at 0xD3FA):  1 = privileged operation (everything ->
+ * SIGINS), 2 = breakpoint (SIGTRC), 3 = arithmetic (SIGFPT),
+ * 4 = illegal instruction (SIGINS, #UD).
+ * ------------------------------------------------------------------------ */
+static void privflt_trap(struct trap_frame *tf, u16 type)
+{
+    u16 *ktop = (u16 *)(WIN_U_LINEAR + 0x1000u);  /* just past kernel stack top (0xE000) */
+    enter_kmode();                   /* the fault vectors onto the kernel stack */
+    ktop[-1] = (u16)tf->ss_v86;      /* 0xDFFE  user_ss */
+    ktop[-2] = (u16)tf->esp_v86;     /* 0xDFFC  user_sp */
+    ktop[-3] = type;                 /* 0xDFFA  trap type code */
+    ktop[-4] = (u16)tf->eflags;      /* 0xDFF8  user flags */
+    ktop[-5] = (u16)tf->cs;          /* 0xDFF6  user cs */
+    ktop[-6] = (u16)tf->eip;         /* 0xDFF4  user ip (faulting instr, not advanced) */
+
+    tf->cs      = GUEST_CS;
+    tf->eip     = (u32)g_privflt_isr_ip;
+    tf->ss_v86  = GUEST_CS;
+    tf->esp_v86 = 0xE000u - 12u;     /* 0xDFF4: SP at the user ip word */
+    tf->eflags  = (tf->eflags & ~(u32)0x200u) | (u32)(1u << 17); /* VM=1, IF=0 */
+    /* leave tf->ds, tf->es and tf->eax..edi = faulting user state for EnterISR */
+}
+
+/* --------------------------------------------------------------------------
  * Common trap dispatcher.  All V86 #GP traps land here; we decode the
  * faulting instruction and emulate it.  CR4.VME is left clear (see entry.asm),
  * so every sensitive op #GP-traps here and we emulate it ourselves.
+ *
+ * This is the inner body; trap_dispatch() wraps it with the CR3/iomap exit
+ * sync (§4.8).  g_kmode may flip inside here (enter_kmode / URET), and the
+ * wrapper applies the hardware consequences once, keyed off the final value.
  * ------------------------------------------------------------------------ */
-void trap_dispatch(struct trap_frame *tf)
+static void trap_dispatch_inner(struct trap_frame *tf)
 {
     u32  lin;
     u8  *p;
@@ -474,102 +683,104 @@ void trap_dispatch(struct trap_frame *tf)
 
     trace_record(tf);
 
-    /* Hardware IRQ: PIT (vec 0x20) -> guest IVT[8].  No EOI in VMM --
-     * guest's clock_isr already does `out 20h, 20h`.  Honor the guest's virtual
-     * IF: a clock tick may simply be dropped when interrupts are disabled. */
+    /* Hardware IRQ: PIT (vec 0x20, priority 6) -> guest IVT[8].  Deliver iff the
+     * graded rule allows (IF && 6 > g_spl); the guest's clock_isr does its own
+     * EOI.  Otherwise EOI the periodic timer here and remember one owed tick
+     * (coalesced), delivered when the priority next drops below 6. */
     if (tf->vector == 32) {
-        if (tf->eflags & 0x200)          /* guest IF=1: deliver the tick */
-            inject_v86(tf, 8, (u16)(tf->eip & 0xFFFF));
-        else
-            outb(0x20, 0x20);            /* guest IF=0 (e.g. in a reflected
-                                          * BIOS handler): EOI here, drop tick */
+        if ((tf->eflags & 0x200) && PIT_PRI > g_spl)
+            inject_v86(tf, 8, (u16)(tf->eip & 0xFFFF), PIT_PRI);
+        else {
+            outb(0x20, 0x20);            /* EOI so the periodic timer keeps running */
+            g_pending_irq |= P_PIT;      /* hold at most one owed tick */
+        }
         return;
     }
 
-    /* Hardware IRQ: KBD (vec 0x21, master IRQ1) -> guest IVT[9].  No EOI in
-     * VMM -- guest's kbd_isr (_common_isr) already does `out 20h, 20h`.  Honor
-     * the guest's virtual IF: hold the IRQ pending if interrupts are disabled
-     * (see deliver_pending). */
+    /* Hardware IRQ: KBD (vec 0x21, priority 4) -> guest IVT[9].  When held we do
+     * NOT EOI -- the PIC in-service bit blocks a re-trap until the guest's own
+     * kbd_isr runs and EOIs; re-injected once IF && 4 > g_spl. */
     if (tf->vector == 33) {
-        if (tf->eflags & 0x200)
-            inject_v86(tf, 9, (u16)(tf->eip & 0xFFFF));
+        if ((tf->eflags & 0x200) && KBD_PRI > g_spl)
+            inject_v86(tf, 9, (u16)(tf->eip & 0xFFFF), KBD_PRI);
         else
             g_pending_irq |= P_KBD;
         return;
     }
 
-    /* Hardware IRQ: IDE primary (vec 0x2E, slave IRQ6) -> guest IVT[0x76].
-     * Guest's ide_isr handles EOI to both slave and master PICs.  Honor the
-     * guest's virtual IF: hold pending if interrupts are disabled. */
+    /* Hardware IRQ: IDE primary (vec 0x2E, priority 5) -> guest IVT[0x76].
+     * Guest's ide_isr handles EOI to both slave and master PICs; held with no
+     * EOI otherwise. */
     if (tf->vector == 46) {
-        if (tf->eflags & 0x200)
-            inject_v86(tf, 0x76, (u16)(tf->eip & 0xFFFF));
+        if ((tf->eflags & 0x200) && IDE_PRI > g_spl)
+            inject_v86(tf, 0x76, (u16)(tf->eip & 0xFFFF), IDE_PRI);
         else
             g_pending_irq |= P_IDE;
         return;
     }
 
-    /* #PF (vector 14): stack growth handler.
-     * NOTE: do NOT call dump_state for user #PF -- it reads ss:sp which may be
-     * the not-present page that caused the fault, triggering a triple fault. */
+    /* #PF (vector 14).  NOTE: do NOT call dump_state for a USER #PF -- it reads
+     * ss:sp which may be the not-present page that caused the fault, triggering
+     * a triple fault. */
     if (tf->vector == 14) {
         u32 cr2 = read_cr2();
         u8  ec  = (u8)(tf->errcode & 0x7);   /* P | W | U bits */
-        u16 cs  = (u16)(tf->cs & 0xFFFF);
 
-        /* Kernel #PF: always a bug -- dump and halt. */
-        if (cs == GUEST_CS) {
+        /* Kernel #PF.  V6 nofault: a copy primitive touching a bad user address
+         * arms `nofault`; redirect to kfault, which longjmps out of the primitive
+         * (-> it returns -1 -> the syscall sets EFAULT) and the machine stays up.
+         * With nofault disarmed it is a genuine kernel bug -- dump and halt (the
+         * V6 panic analog), which keeps the post-mortem for real bugs. */
+        if (g_kmode) {
+            if (g_nofault_addr && *(u16 *)g_nofault_addr) {
+                tf->cs  = GUEST_CS;
+                tf->eip = (u32)g_kfault_ip;
+                tf->ds  = GUEST_CS;   /* copyin's memcpy left DS = user window;
+                                       * kfault needs kernel DS to reach u/env/resume */
+                /* leave SS:SP = the faulting KERNEL stack; resume() unwinds it via
+                 * nofault_env.  No WIN_U frame like pfault_trap, no enter_kmode --
+                 * we are already in kmode on the kernel stack. */
+                return;
+            }
             dump_state(tf, "kernel #PF");
             for (;;) ;
         }
 
-        /* User write to the read-only shared text (WIN_TEXT PTE 0x5):
-         * reflect to the guest kernel, which kills the process (V6: text
-         * segments are pure).  ec: P=1 and W=1. */
-        if ((ec & 3) == 3 && cr2 >= 0xA0000u && cr2 < 0xB0000u) {
-            pfault_trap(tf, 0xFFFEu);   /* >= USTACK (0xFFFE): segflt -> SIGSEG */
+        /* User #PF.  A not-present fault inside the sparse WIN_DATA window of an
+         * EXE process is a stack-growth candidate: reflect to segflt(), which
+         * does the precise ndata/nstack check and either grows the stack (and
+         * restarts) or kills the process.  The g_sureg_mode==1 gate stops a
+         * mode=0 process that forged DS=0xD000 from tripping a bogus grow(). */
+        if (cr2 >= 0xD0000u && cr2 < 0xDF000u && !(ec & 1) && g_sureg_mode == 1) {
+            pfault_trap(tf, (u16)(cr2 - 0xD0000u));
             return;
         }
 
-        /* Protection violation (P=1): not stack growth.
-         * Read or write to a not-present page (P=0) in the heap gap is handled
-         * below; segflt() validates the CR2 range.  A genuine protection
-         * violation on a present page is a monitor bug -- halt. */
-        if (ec & 1) {
-            log_puts("\r\n=== VMM #PF (protection violation) cs:ip=");
-            log_hex(cs); log_putc(':'); log_hex(tf->eip & 0xFFFF);
-            log_puts(" cr2="); log_hex(cr2);
-            log_puts(" err="); log_hex(tf->errcode);
-            log_puts("\r\n");
-            for (;;) ;
-        }
+        /* Everything else is a segmentation violation: a not-present access to
+         * kernel / VMM / IVT / page-table / another process's memory, a
+         * present-page protection fault (incl. a write to the read-only shared
+         * text, or a V86 CPL-3 touch of a U=0 VMM page), or an out-of-window
+         * access.  segflt() sees fa >= USTACK and posts SIGSEG (default
+         * core+exit, catchable on the user stack). */
+        pfault_trap(tf, 0xFFFEu);   /* >= USTACK (0xFFFE): segflt -> SIGSEG */
+        return;
+    }
 
-        /* CR2 outside WIN_DATA (linear 0xD0000..0xDFFFF): unexpected.
-         * Log frame values only (no dereference: ss:sp may be unmapped, and
-         * for a ring-0 fault the tail of the frame is not even pushed). */
-        if (cr2 < 0xD0000u || cr2 >= 0xE0000u) {
-            log_puts("\r\n=== VMM #PF outside WIN_DATA cr2=");
-            log_hex(cr2);
-            log_puts(" err="); log_hex(tf->errcode);
-            log_puts(" cs:eip="); log_hex(tf->cs); log_putc(':'); log_hex(tf->eip);
-            log_puts(" efl="); log_hex(tf->eflags);
-            log_puts("\r\nss:sp="); log_hex(tf->ss_v86); log_putc(':'); log_hex(tf->esp_v86);
-            log_puts(" ds="); log_hex(tf->ds);
-            log_puts(" es="); log_hex(tf->es);
-            log_puts(" ax="); log_hex(tf->eax);
-            log_puts(" bx="); log_hex(tf->ebx);
-            log_puts(" cx="); log_hex(tf->ecx);
-            log_puts(" dx="); log_hex(tf->edx);
-            log_puts(" si="); log_hex(tf->esi);
-            log_puts(" di="); log_hex(tf->edi);
-            log_puts("\r\n");
-            for (;;) ;
+    /* User-mode CPU exceptions: deliver as V6 signals instead of halting
+     * the machine.  A divide error (#DE) or #UD is a genuine fault on its own
+     * IDT vector; int3/INTO usually arrive as #GP and are typed in the umode
+     * whitelist below, but we map their vectors here too in case the CPU
+     * delivers them directly.  In kernel mode any such exception is a bug and
+     * falls through to the post-mortem halt (the V6 panic analog). */
+    if (!g_kmode && tf->vector != 13) {
+        u16 type;
+        switch (tf->vector) {
+        case 0:  type = 3; break;   /* #DE divide     -> SIGFPT */
+        case 4:  type = 3; break;   /* #OF overflow   -> SIGFPT */
+        case 3:  type = 2; break;   /* #BP breakpoint -> SIGTRC */
+        default: type = 4; break;   /* #UD (6) and any other -> SIGINS */
         }
-
-        /* Stack growth candidate: reflect as a trap on the kernel stack,
-         * redirected to _segflt_isr.  Kernel segflt() does the precise
-         * ndata/nstack check and either grows or kills the process. */
-        pfault_trap(tf, (u16)(cr2 - 0xD0000u));
+        privflt_trap(tf, type);
         return;
     }
 
@@ -592,42 +803,108 @@ void trap_dispatch(struct trap_frame *tf)
     }
     op = p[0];
 
+    /* User-mode default-deny whitelist.  A user process only ever #GP-traps on
+     * a sensitive instruction, and the only ones it is allowed to execute are
+     * the syscall INT (0xCD, sub-gated to int 81h below), PUSHF (0x9C) and POPF
+     * (0x9D, IF pinned below).  Everything else -- int 80h/82h, other INT n
+     * (BIOS), CLI/STI/IRET/HLT, all IN/OUT/INS/OUTS forms (now #GP-trapping
+     * because the umode iomap denies every port), and any unknown opcode -- is
+     * a privileged operation and becomes SIGINS. */
+    if (!g_kmode && op != 0xCD && op != 0x9C && op != 0x9D) {
+        u16 type = 1;                       /* default: privileged op -> SIGINS */
+        if (op == 0xCC)      type = 2;      /* int3 -> SIGTRC (breakpoint) */
+        else if (op == 0xCE) type = 3;      /* into -> SIGFPT (overflow) */
+        privflt_trap(tf, type);
+        return;
+    }
+
     switch (op) {
     case 0xCD: {                            /* INT imm8 */
         u8 vec = p[1];
         instr_len = 2 + prefix_len;
-        if (vec == 0x80) {
+
+        if (vec == 0x80) {                  /* hypercall */
+            if (!g_kmode) {                 /* user int 80h: a privileged op */
+                privflt_trap(tf, 1);
+                return;
+            }
             /* Advance past the int 80h before dispatch so the guest resumes at
              * the next instruction.  No hypercall reads or rewrites tf->eip. */
             tf->eip = (tf->eip + instr_len) & 0xFFFF;
             hyper_dispatch(tf);
-        } else {
-            /* Reflect all other software INTs to the guest IVT so the real
-             * handler runs in V86. In particular BIOS int 10h renders to
-             * VGA text memory -- that's what -curses displays.
-             * For AH=0Eh (teletype) we also tee the byte to the serial log so
-             * the guest console is still capturable headless (-nographic) for
-             * automated testing; interactive -curses runs leave COM1 unwired,
-             * so this copy is simply discarded and the user never sees it.
-             * reflect_int sets tf->eip = IVT[vec], no further advance. */
-            if (vec == 0x10 && ((tf->eax >> 8) & 0xFF) == 0x0E)
-                log_putc((char)(tf->eax & 0xFF));
-            reflect_int(tf, vec);
+            return;
         }
+
+        if (vec == URET_VECTOR) {           /* int 82h: URET, kernel -> user */
+            u16 ip, cs, fl;
+            if (!g_kmode) {                 /* user int 82h: URET forgery */
+                privflt_trap(tf, 1);
+                return;
+            }
+            /* Pop the iret-style frame the kernel's UExitISR left on SS:SP,
+             * exactly like the IRET emulation below. */
+            ip = v86_pop16(tf);
+            cs = v86_pop16(tf);
+            fl = v86_pop16(tf) & ~(u16)V86_FLAGS_MASK;
+            tf->eip    = ip;
+            tf->cs     = cs;
+            /* User always runs interruptible (V6 user PS priority 0): force
+             * IF=1 in addition to the reserved bit. */
+            tf->eflags = (tf->eflags & 0xFFFF0000) | (u32)fl | 0x2u | 0x200u;
+            g_kmode = 0;
+            g_spl   = 0;                    /* user runs at PDP-11 priority 0 */
+            /* The exit path loads the user CR3 and denies I/O here. */
+            deliver_pending(tf);            /* a held device IRQ re-enters kmode */
+            return;
+        }
+
+        /* Any other software INT.  From user mode only the syscall vector
+         * (int 81h) is allowed through -- it reflects to IVT[0x81], and
+         * enter_kmode (inside inject_v86) flips into kernel mode.  Every other
+         * user INT n (BIOS int 10h/13h, etc.) is a privileged op -> SIGINS. */
+        if (!g_kmode && vec != 0x81) {
+            privflt_trap(tf, 1);
+            return;
+        }
+
+        /* Reflect the INT to the guest IVT so the real handler runs in V86. In
+         * particular BIOS int 10h renders to VGA text memory -- that's what
+         * -curses displays.  For AH=0Eh (teletype) we also tee the byte to the
+         * serial log so the guest console is still capturable headless
+         * (-nographic) for automated testing; interactive -curses runs leave
+         * COM1 unwired, so this copy is simply discarded and the user never
+         * sees it.  reflect_int sets tf->eip = IVT[vec], no further advance. */
+        if (vec == 0x10 && ((tf->eax >> 8) & 0xFF) == 0x0E)
+            log_putc((char)(tf->eax & 0xFF));
+        reflect_int(tf, vec);
         return;
     }
 
-    case 0x9C:                              /* PUSHF / PUSHFD */
-        v86_push16(tf, (u16)(tf->eflags & 0xFFFF));
+    case 0x9C: {                           /* PUSHF / PUSHFD */
+        u16 img = (u16)(tf->eflags & 0xFFFF);
+        if (g_kmode)                       /* stash the virtual priority */
+            img = (img & ~0x7000u) | ((u16)g_spl << 12);
+        v86_push16(tf, img);
         tf->eip = (tf->eip + 1 + prefix_len) & 0xFFFF;
         return;
+    }
 
-    case 0x9D:                              /* POPF / POPFD */
-        flags16 = v86_pop16(tf) & ~(u16)V86_FLAGS_MASK;
+    case 0x9D: {                           /* POPF / POPFD */
+        u16 raw = v86_pop16(tf);
+        if (g_kmode)                       /* extract the virtual priority,
+                                            * BEFORE stripping V86_FLAGS_MASK */
+            g_spl = (u8)((raw >> 12) & 7);
+        flags16 = raw & ~(u16)V86_FLAGS_MASK;
         tf->eflags = (tf->eflags & 0xFFFF0000) | (u32)flags16 | 0x2u;
+        if (!g_kmode)
+            tf->eflags |= 0x200u;          /* user always runs interruptible:
+                                            * a user popf can never clear IF
+                                            * (required by the _callsig
+                                            * trampoline, which restores IF=1) */
         tf->eip = (tf->eip + 1 + prefix_len) & 0xFFFF;
-        deliver_pending(tf);               /* IF may have just gone 0->1 */
+        deliver_pending(tf);               /* IF/priority may have just dropped */
         return;
+    }
 
     case 0xFA:                              /* CLI */
         tf->eflags &= ~(u32)0x200;
@@ -641,14 +918,19 @@ void trap_dispatch(struct trap_frame *tf)
         return;
 
     case 0xCF: {                            /* IRET / IRETD */
-        u16 ip, cs;
+        u16 ip, cs, raw;
         ip       = v86_pop16(tf);
         cs       = v86_pop16(tf);
-        flags16  = v86_pop16(tf) & ~(u16)V86_FLAGS_MASK;
+        raw      = v86_pop16(tf);
+        if (g_kmode)                        /* restore the virtual priority,
+                                             * incl. do_resume's context-switch
+                                             * iret -- BEFORE stripping the mask */
+            g_spl = (u8)((raw >> 12) & 7);
+        flags16  = raw & ~(u16)V86_FLAGS_MASK;
         tf->eip  = ip;
         tf->cs   = cs;
         tf->eflags = (tf->eflags & 0xFFFF0000) | (u32)flags16 | 0x2u;
-        deliver_pending(tf);               /* IF may have just gone 0->1 */
+        deliver_pending(tf);               /* IF/priority may have just dropped */
         return;
     }
 
@@ -711,6 +993,39 @@ void trap_dispatch(struct trap_frame *tf)
 }
 
 /* --------------------------------------------------------------------------
+ * Trap-dispatch wrapper: apply the CR3 entry rule, run the emulator, then apply
+ * the CR3/iomap exit sync (§4.8) once, keyed off the final g_kmode.  g_kmode may
+ * flip several times inside trap_dispatch_inner (e.g. URET sets 0, then a held
+ * IRQ's inject_v86 sets 1 again); only the value the guest actually resumes
+ * under matters, so we sync here, at the single exit, not at each transition.
+ *
+ *   kmode  -> iomap ALLOW, CR3 = PD_k (ports run native; kernel has full reach)
+ *   umode  -> iomap DENY,  CR3 = PD_u (every IN/OUT #GPs; process is confined)
+ *
+ * Net cost: a kernel trap (the common case -- every spl/pushf/cli) does ZERO
+ * CR3 loads; only a real user<->kernel transition pays one.  The iomap store is
+ * cheap (no TLB flush) and takes effect on the next V86 instruction.
+ * ------------------------------------------------------------------------ */
+void trap_dispatch(struct trap_frame *tf)
+{
+    /* Entry rule: a trap from user leaves CR3 = PD_u, but the emulator must
+     * reach the kernel view -- pfault_trap/privflt_trap write the kernel-stack
+     * frame through WIN_U (0x1D000), absent from PD_u -- so load PD_k before
+     * touching any of it (i.e. before trap_dispatch_inner's trace_record). */
+    if (!g_kmode)
+        load_cr3(PD_K_PHYS);
+
+    trap_dispatch_inner(tf);
+
+    /* Exit rule: flip the I/O bitmap and page-table view to the mode the guest
+     * resumes under.  Only a real transition loads CR3; a kernel trap leaves
+     * PD_k in place. */
+    tss0.base.iomap_base = g_kmode ? IOMAP_ALLOW : IOMAP_DENY;
+    if (!g_kmode)
+        load_cr3(PD_U_PHYS);
+}
+
+/* --------------------------------------------------------------------------
  * P2a entry: set up IDT/TSS, then hand off to unix.com in V86.
  * ------------------------------------------------------------------------ */
 void vmm_main(void)
@@ -739,6 +1054,37 @@ void vmm_main(void)
             pt0[0xA0 + k] = 0;
             pt0[0xD0 + k] = 0;
         }
+        flush_tlb();
+    }
+
+    /* Build the user page-table view (PD_u @ 0x4000 -> PT0_u @ 0x5000).  Only
+     * directory entry 0 (the first 4 MB, where all guest memory lives) is
+     * present.  PT0_u starts with just the VMM's supervisor pages; the first
+     * HVC_SUREG fills in the running process's windows.  PD_u is loaded only on
+     * a return to user mode, which happens well after the first HVC_SUREG, so
+     * PT0_u is always populated by then -- this initial fill just keeps PD_u
+     * well-formed. */
+    {
+        u32 *pd_u = (u32 *)PD_U_PHYS;
+        u32  k;
+        for (k = 0; k < 1024; k++)
+            pd_u[k] = 0;
+        pd_u[0] = PT0_U_PHYS | 0x7u;    /* P|RW|US; per-page US in PT0_u decides */
+        build_pt0u(0, 0, 0, 0, 0, 0);
+    }
+
+    /* Hardening: mark the VMM's own low pages SUPERVISOR (U=0) in the KERNEL
+     * view too (they are already U=0 in the user view via build_pt0u).  The
+     * guest kernel is also V86 CPL 3, so this stops a buggy guest kernel from
+     * corrupting the page tables (0x02-0x05), the VMM binary (0x08-0x0B), or the
+     * ring-0 stack (0x0F) with a wild pointer.  The VMM itself runs CPL 0 and
+     * still reaches them.  Page 0 (IVT) stays U=1 -- the kernel writes vectors
+     * there at boot; page 1 (low memory) is left as-is. */
+    {
+        u32 *pt0 = (u32 *)PT0_K_PHYS;
+        u32  k;
+        for (k = 0x02; k <= 0x0F; k++)
+            pt0[k] = (k << 12) | 0x3u;   /* identity, P|RW, U=0 (clear US) */
         flush_tlb();
     }
 

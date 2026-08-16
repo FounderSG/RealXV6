@@ -1,10 +1,11 @@
 PUBLIC  _clock_isr, _trap_isr, _getps, _setps, _save, _use_resume_stack, _do_resume, _memcpy, _memset
 PUBLIC  _bios_getc, _bios_putc, _move_to_user_mode, _ide_isr, _kbd_isr, _uart_isr, _common_isr
-PUBLIC  _segflt_isr
+PUBLIC  _segflt_isr, _privflt_isr
 EXTRN   _main: near
 EXTRN   _isr_savuar: near, _isr_router: near, _clock: near, _check_runrun: near
 EXTRN   _trap0: near, _trap: near, _rkintr: near
-EXTRN   _segflt: near
+EXTRN   _segflt: near, _privflt: near
+EXTRN   _intr_ps: word
 
 DGROUP  GROUP _TEXT,_DATA,_BSS,_BSSEND
 
@@ -92,6 +93,24 @@ ExitISR MACRO
     iret
     ENDM
 
+; Return to USER mode.  Identical register pops to ExitISR, but ends in the URET
+; hypercall (int 82h) instead of iret: the VMM pops the {ip,cs,flags} frame
+; exactly as it would for iret AND flips out of kernel mode (g_kmode=0), so
+; user-mode protection takes effect on the returned-to process.  A plain iret
+; here would leave the VMM in kernel mode with every protection silently off.
+UExitISR MACRO
+    pop ds
+    pop es
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    pop di
+    pop si
+    pop bp
+    int 82h
+    ENDM
+
 SwitchToKernelStack MACRO
     mov cx, sp
     mov dx, ss
@@ -114,6 +133,13 @@ SwitchToUserStack MACRO
 
 _clock_isr:
     EnterISR
+    ; Capture the interrupted PS image for clock()'s callout/lbolt priority
+    ; gate.  The iret frame the VMM pushed sits just above the 9-word EnterISR
+    ; block: ip@[sp+18], cs@[sp+20], flags@[sp+22]; the VMM stashed the
+    ; interrupted virtual priority in flags bits 12-14.
+    mov bp, sp
+    mov ax, [bp+22]
+    mov word ptr _intr_ps, ax
     xor di, di
     jmp _common_isr
 
@@ -144,16 +170,20 @@ _common_isr   proc    near
     call near ptr _isr_savuar
     SwitchToKernelStack
 @@:
+    sti                ; on the kernel stack now: run the handler interruptible so
+                       ; a higher-BR IRQ can nest (graded rule dev_pri>g_spl gates)
     push si
     push di
     call near ptr _isr_router
     pop di
     pop si
     or si, si
-    jz @f
+    jz common_kret          ; ss == cs: interrupted the kernel -> plain iret,
+                            ; VMM stays in kernel mode (nested return)
     call near ptr _check_runrun
     SwitchToUserStack
-@@:
+    UExitISR                ; interrupted user mode -> URET flips VMM to user
+common_kret:
     ExitISR
 _common_isr   endp
 
@@ -165,7 +195,7 @@ _trap_isr:
     call near ptr _trap
     call near ptr _check_runrun
     SwitchToUserStack
-    ExitISR
+    UExitISR                ; syscall always returns to user mode
 
 _getps  proc    near
     pushf
@@ -173,17 +203,16 @@ _getps  proc    near
     ret
 _getps  endp
 
+; setps(int) -- restore the full PS via popf, so the VMM's popf emulation both
+; sets IF and extracts the virtual priority (FLAGS bits 12-14) into g_spl.
+; getps stays pushf (the VMM's pushf emulation stashes g_spl into the image).
 _setps  proc    near
     push bp
     mov bp, sp
     mov ax, [bp+4]
     pop bp
-    and ax, 0200h
-    jz @f
-    sti
-    ret
-@@:
-    cli
+    push ax
+    popf
     ret
 _setps  endp
 
@@ -263,6 +292,11 @@ _do_resume   proc    near
 _do_resume   endp
 
 
+; Drop proc[1] into user mode to run icode.  V6 does this by manipulating the
+; PS previous-mode bits and returning through the trap; here the return-to-user
+; must go through URET (int 82h) so the VMM leaves kernel mode -- a plain retf
+; does not trap, so it would enter user with every protection silently off.
+; Push an iret-style frame {ip=0x100, cs=user seg, flags=IF} and URET it.
 _move_to_user_mode proc    near
     mov bp, sp
     mov dx, [bp+2]
@@ -271,10 +305,12 @@ _move_to_user_mode proc    near
     mov sp, 0f000h
     sti
     mov ds, dx
-    push dx
-    mov ax, 0100h
+    mov ax, 0200h           ; user flags: IF=1 (user always interruptible)
     push ax
-    retf
+    push dx                 ; user cs
+    mov ax, 0100h
+    push ax                 ; user ip (icode entry)
+    int 82h                 ; URET: VMM pops {ip,cs,flags}, g_kmode=0, -> user
 _move_to_user_mode endp
 
 ; void memcpy(void far *dst, const void far *src, int n)
@@ -365,11 +401,32 @@ _segflt_isr     proc    near
     push    word ptr [bp+26]        ; user_sp
     push    word ptr [bp+24]        ; fault_off
     call    near ptr _segflt        ; segflt(fault_off, user_sp, user_ss, kctx)
-    ; segflt set uret_ss/uret_sp = return ss:sp; IRET back through it.
+    ; segflt set uret_ss/uret_sp = return ss:sp; return to user through it.
     mov     sp, U_AREA + 4096 - 4   ; -> uret_sp slot (0xDFFC)
     SwitchToUserStack               ; ss:sp = uret_ss:uret_sp
-    ExitISR                         ; pop ctx regs; iret to user
+    UExitISR                        ; pop ctx regs; URET to user
 _segflt_isr     endp
+
+; VMM redirect target for a user-mode privileged/illegal operation (the x86
+; stand-in for the PDP-11 illegal-instruction / BPT / EMT / IOT traps): the
+; SIGINS channel.  Entered via VMM iretd on the KERNEL stack exactly like
+; _segflt_isr, but the word at 0xDFFA is a trap TYPE code (see privflt_trap)
+; instead of a fault offset, and the pushed user ip is the faulting instruction
+; itself (re-executed on a caught return, per PDP-11 semantics).
+_privflt_isr    proc    near
+    EnterISR                        ; push bp,si,di,ax,bx,cx,dx,es,ds; ds=cs
+    mov     bp, sp                  ; bp -> ctx (ds@0..bp@16, ip@18,cs@20,flag@22,
+                                    ;            type@24, user_sp@26, user_ss@28)
+    push    bp                      ; kctx (near ptr to the ctx)
+    push    word ptr [bp+28]        ; user_ss
+    push    word ptr [bp+26]        ; user_sp
+    push    word ptr [bp+24]        ; trap type code
+    call    near ptr _privflt       ; privflt(type, user_sp, user_ss, kctx)
+    ; privflt set uret_ss/uret_sp = return ss:sp; return to user through it.
+    mov     sp, U_AREA + 4096 - 4   ; -> uret_sp slot (0xDFFC)
+    SwitchToUserStack               ; ss:sp = uret_ss:uret_sp
+    UExitISR                        ; pop ctx regs; URET to user
+_privflt_isr    endp
 
 _BSS    SEGMENT word public 'BSS'
 bdata@          label   byte

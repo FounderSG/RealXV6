@@ -4,7 +4,6 @@ struct proc proc[NPROC];
 struct inode *rootdir;
 
 int core_cs;
-int core_spl;
 
 int mpid;
 char runin;
@@ -72,6 +71,8 @@ void main()
 {
     pc_init();
     segflt_setup();
+    privflt_setup();
+    nofault_setup();
 
     maxmem = 128;
     mfree(coremap, maxmem, USPACE);

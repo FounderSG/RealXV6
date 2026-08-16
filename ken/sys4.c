@@ -273,7 +273,10 @@ void psinfo(void)
         return;
     }
     p = &proc[idx];
-    copyout((uint)p, udst, sizeof(struct proc));
+    if(copyout((uint)p, udst, sizeof(struct proc))) {
+        u.u_error = EFAULT;
+        return;
+    }
     u.u_ar0[R0] = p->p_stat;
     if(p->p_stat == 0 || p->p_tsize == 0)
         return;                         /* no EXE argument frame */
@@ -307,7 +310,11 @@ loop:
             brelse(bp);                 /* swapped in while we slept; reread */
             goto loop;
         }
-        copyout((uint)bp->b_addr, sdst, 512);
+        if(copyout((uint)bp->b_addr, sdst, 512)) {
+            brelse(bp);
+            u.u_error = EFAULT;
+            return;
+        }
         brelse(bp);
     }
 }

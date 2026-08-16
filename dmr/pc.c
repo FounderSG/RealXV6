@@ -19,6 +19,18 @@ void savu(struct proc *p)
  */
 int user_dseg = 0;
 
+/*
+ * V6 `nofault` (conf/m40.s): a kernel fault on a bad USER address, taken while a
+ * copy primitive is active, is recoverable -- the primitive returns an error and
+ * the syscall sets EFAULT, rather than bringing the machine down.  `nofault` is
+ * the armed flag the VMM reads on a kernel #PF (vmm/main.c); `nofault_env` is the
+ * recovery context the primitive captured with save().  A single global env is
+ * safe because the primitives are straight-line (no sleep) and never nest, so
+ * `nofault` is never armed across a context switch (V6 treats it as a global too).
+ */
+int     nofault = 0;
+label_t nofault_env;
+
 /* HVC_SEGFLT_SETUP (0x07): BX = near IP of _segflt_isr in kernel code segment.
  * The VMM records it and vectors a user #PF there, on the kernel stack. */
 extern void segflt_isr(void);   /* PUBLIC in dmr/m86.asm */
@@ -32,6 +44,22 @@ static void hvc_segflt_setup(int ip);
 void segflt_setup(void)
 {
     hvc_segflt_setup((int)segflt_isr);
+}
+
+/* HVC_PRIVFLT_SETUP (0x08): BX = near IP of _privflt_isr in kernel code segment.
+ * The VMM records it and vectors a user-mode privileged-op fault there, on the
+ * kernel stack -- the SIGINS analog of segflt's SIGSEG channel. */
+extern void privflt_isr(void);  /* PUBLIC in dmr/m86.asm */
+static void hvc_privflt_setup(int ip);
+#pragma aux hvc_privflt_setup = \
+    "mov ah, 08h"               \
+    "int 80h"                   \
+    parm [bx]                   \
+    modify [ax];
+
+void privflt_setup(void)
+{
+    hvc_privflt_setup((int)privflt_isr);
 }
 
 /* HVC_SUREG: BX = near ptr to sureg_desc (passed via parm [bx] pragma). */
@@ -64,8 +92,12 @@ void sureg(struct proc *p)
     } else {
         desc.taddr = 0;
         desc.tsize = 0;
-        desc.daddr = 0;
-        desc.dsize = 0;
+        desc.daddr = p->p_addr;                 /* single-seg block base: the VMM
+                                                 * identity-maps it into the user
+                                                 * page-table view (PT0_u) ... */
+        desc.dsize = USIZE-1;                    /* ... all pages EXCEPT the u-page
+                                                 * (slot USIZE-1), which stays
+                                                 * invisible to user */
         desc.ssize = 0;
         desc.uaddr = p->p_addr + (USIZE-1);
         desc.mode  = 0;
@@ -121,57 +153,84 @@ void uswitch(struct proc *p, label_t ctx)
     do_resume(resume_ctx);
 }
 
+/*
+ * Graded SPL: the PDP-11 processor priority lives in FLAGS bits
+ * 12-14 -- the VMM's g_spl shadow -- reached through getps/setps.  setps is
+ * push;popf, so the priority bits reach the monitor, which delivers a device
+ * IRQ iff its bus-request level exceeds the current priority.  splN sets
+ * priority N and preserves IF; spl0 also forces IF=1 (enable all).  The ken/ C
+ * `s=getps(); splN(); ...; setps(s)` pattern transparently gains graded
+ * semantics with no change.
+ */
 void spl0(void)
 {
-    core_spl = 0;
-    enable();
+    setps((getps() | 0x200) & ~0x7000);      /* priority 0, IF=1 */
 }
 
 void spl1(void)
 {
-    core_spl = 1;
-    disable();
+    setps((getps() & ~0x7000) | (1 << 12));
 }
 
 void spl5(void)
 {
-    core_spl = 5;
-    disable();
+    setps((getps() & ~0x7000) | (5 << 12));
 }
 
 void spl6(void)
 {
-    core_spl = 6;
-    disable();
+    setps((getps() & ~0x7000) | (6 << 12));
 }
 
 void spl7(void)
 {
-    core_spl = 7;
-    disable();
+    setps((getps() & ~0x7000) | (7 << 12));
 }
 
 #define user_space_io_pointer MK_FP(user_dseg, addr)
 
+/*
+ * User-space access primitives.  Each arms `nofault` around the access: on a
+ * fault the VMM redirects to kfault(), whose resume() makes this save() "return"
+ * nonzero, so the primitive returns the V6 fault value (-1) instead of halting.
+ * setjmp caveat: on the fault path we return immediately without using the local
+ * (c/w), so no `volatile` is needed; keep no needed local live across the fault.
+ */
 int fubyte(int addr)
 {
-    return *(char far *)user_space_io_pointer & 0377;
+    int c;
+    if (save(nofault_env)) { nofault = 0; return -1; }
+    nofault = 1;
+    c = *(char far *)user_space_io_pointer & 0377;
+    nofault = 0;
+    return c;
 }
 
 int fuword(int addr)
 {
-    return *(int far *)user_space_io_pointer;
+    int w;
+    if (save(nofault_env)) { nofault = 0; return -1; }
+    nofault = 1;
+    w = *(int far *)user_space_io_pointer;
+    nofault = 0;
+    return w;
 }
 
 int subyte(int addr, char ch)
 {
+    if (save(nofault_env)) { nofault = 0; return -1; }
+    nofault = 1;
     *(char far *)user_space_io_pointer = ch;
+    nofault = 0;
     return 0;
 }
 
 int suword(int addr, int value)
 {
+    if (save(nofault_env)) { nofault = 0; return -1; }
+    nofault = 1;
     *(int far *)user_space_io_pointer = value;
+    nofault = 0;
     return 0;
 }
 
@@ -206,14 +265,49 @@ void clearseg(uint dst)
     memset(PAGE_ADDR(dst), 0, PAGESIZ);
 }
 
-void copyout(uint srcAddr, uint dstAddr, int iSize)
+int copyout(uint srcAddr, uint dstAddr, int iSize)
 {
+    if (save(nofault_env)) { nofault = 0; return -1; }
+    nofault = 1;
     memcpy(MK_FP(user_dseg, dstAddr), MK_FP(core_cs, srcAddr), iSize);
+    nofault = 0;
+    return 0;
 }
 
-void copyin(uint srcAddr, uint dstAddr, int iSize)
+int copyin(uint srcAddr, uint dstAddr, int iSize)
 {
+    if (save(nofault_env)) { nofault = 0; return -1; }
+    nofault = 1;
     memcpy(MK_FP(core_cs, dstAddr), MK_FP(user_dseg, srcAddr), iSize);
+    nofault = 0;
+    return 0;
+}
+
+/*
+ * Reached ONLY by the VMM's kernel-#PF redirect when a copy primitive faulted
+ * with `nofault` armed.  Longjmp back into that primitive so its save() returns
+ * nonzero -> it returns -1.  Mirrors psig's resume(...,u_qsav) abnormal return
+ * (ken/slp.c).  Entered by an eip-redirect (not a call), so no return address is
+ * on the stack -- fine, resume() never returns and relocates to resume_stack
+ * before restoring, so kfault's entry SP does not matter.
+ */
+void kfault(void)
+{
+    resume(u.u_procp, nofault_env);
+}
+
+/* HVC_NOFAULT_SETUP (0x09): BX = near IP of kfault, CX = near addr of nofault.
+ * Registers the recovery vector and the flag address with the VMM (once, at boot). */
+static void hvc_nofault_setup(int ip, int flagaddr);
+#pragma aux hvc_nofault_setup = \
+    "mov ah, 09h"               \
+    "int 80h"                   \
+    parm [bx] [cx]              \
+    modify [ax];
+
+void nofault_setup(void)
+{
+    hvc_nofault_setup((int)kfault, (int)&nofault);
 }
 
 typedef union {

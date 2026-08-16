@@ -64,7 +64,6 @@ struct sysent
 extern struct sysent sysent[64];
 
 extern int core_cs;     /* kernel code segment, reg CS */
-extern int core_spl;    /* system priority level */
 extern int user_dseg;   /* D-space segment for current proc: WDSEG (EXE) or p_addr*256 */
 
 /* trap.c */
@@ -232,6 +231,10 @@ void segflt_setup(void);               /* register _segflt_isr address with VMM 
 void segflt(unsigned fa, unsigned usp, unsigned uss, unsigned kctx);
                                        /* trap.c: VMM #PF handler, entered on the kernel stack from
                                         * _segflt_isr; grow() and restart, or psignal(SIGSEG) */
+void privflt_setup(void);              /* register _privflt_isr address with VMM (call once at boot) */
+void privflt(unsigned type, unsigned usp, unsigned uss, unsigned kctx);
+                                       /* trap.c: VMM privileged-op handler, entered on the kernel
+                                        * stack from _privflt_isr; psignal(SIGINS) */
 
 /* sig.c */
 void signal(struct tty *tp, int sig);
@@ -253,6 +256,7 @@ void xfree(void);
 void xccdec(struct text *xp);
 
 /* clock.c */
+extern int intr_ps;                    /* interrupted PS image for clock()'s priority gate */
 void clock(int mode);
 void timeout(int (*fun)(int ), int arg, int tim);
 
@@ -325,8 +329,12 @@ int fuibyte(int addr);
 int suibyte(int addr, char ch);
 void copyseg(uint src, uint dst);
 void clearseg(uint dst);
-void copyout(uint srcAddr, uint dstAddr, int iSize);
-void copyin(uint srcAddr, uint dstAddr, int iSize);
+int copyout(uint srcAddr, uint dstAddr, int iSize);
+int copyin(uint srcAddr, uint dstAddr, int iSize);
+extern int nofault;             /* V6 nofault: armed flag the VMM reads on kernel #PF */
+extern label_t nofault_env;     /* recovery context armed by the copy primitives */
+void kfault(void);              /* VMM kernel-#PF redirect target: resume() out of a primitive */
+void nofault_setup(void);       /* register kfault/&nofault with VMM (call once at boot) */
 void dpadd(int x[2], int y);
 int dpcmp(int xh, int xl, int yh, int yl);
 int ldiv(int x, int y);

@@ -155,10 +155,11 @@ void iomove(struct buf *bp, int o, int an, int flag)
     n = an;
     cp = (uint)bp->b_addr + o;
     if(u.u_segflg==0 && ((n | (int)cp | (int)u.u_base)&01)==0) {
-        if (flag==B_WRITE)
-            copyin((uint)u.u_base, (uint)cp, n);
-        else
-            copyout((uint)cp, (uint)u.u_base, n);
+        if (flag==B_WRITE) {
+            if (copyin((uint)u.u_base, (uint)cp, n)) { u.u_error = EFAULT; return; }
+        } else {
+            if (copyout((uint)cp, (uint)u.u_base, n)) { u.u_error = EFAULT; return; }
+        }
         u.u_base += n;
         dpadd(u.u_offset, n);
         u.u_count -= n;

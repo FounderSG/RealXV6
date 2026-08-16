@@ -211,10 +211,21 @@ load_tss_:
 
 ; ----------------------------------------------------------------------------
 ; flush_tlb()  -- reload CR3 to invalidate the TLB after rewriting PTEs.
+; Reloads whatever CR3 is CURRENTLY loaded, so it works for either page-table
+; view (the caller runs in kmode -> PD_k, per the CR3 discipline in main.c).
 ; ----------------------------------------------------------------------------
         public  flush_tlb_
 flush_tlb_:
         mov     eax, cr3
+        mov     cr3, eax
+        ret
+
+; ----------------------------------------------------------------------------
+; load_cr3(u32 phys)  -- watcall: phys in EAX.  Switch the active page-table
+; view (kernel PD_k @ 0x2000 <-> user PD_u @ 0x4000) and flush the TLB.
+; ----------------------------------------------------------------------------
+        public  load_cr3_
+load_cr3_:
         mov     cr3, eax
         ret
 

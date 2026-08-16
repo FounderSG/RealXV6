@@ -106,6 +106,15 @@ struct tss_full {
 #define HVC_REPORT  0x05    /* guest test verdict: AL=id BX=expect CX=actual DX=fail */
 #define HVC_SUREG         0x06  /* load user segment registers: BX=near ptr to sureg_desc */
 #define HVC_SEGFLT_SETUP  0x07  /* register _segflt_isr: BX = near IP in kernel CS */
+#define HVC_PRIVFLT_SETUP 0x08  /* register _privflt_isr: BX = near IP in kernel CS */
+#define HVC_NOFAULT_SETUP 0x09  /* register kfault + nofault flag: BX=near IP, CX=near addr */
+
+/* URET ("user return"): the guest kernel returns to user mode via int 0x82.
+ * INT n in V86 with IOPL=0 #GPs before pushing, so the whole thing is defined
+ * by the VMM: pop {ip,cs,flags} from the guest SS:SP (as IRET would), force the
+ * guest into user mode (g_kmode=0) with IF=1.  kmode-only; from user it is a
+ * privileged op -> SIGINS. */
+#define URET_VECTOR       0x82
 
 /* Linear base of the WIN_U window (pt0[0x1D]).  The guest reaches its u-area
  * (and the kernel stack at its top, 0xE000) via GUEST_CS:0xD000..0xDFFF, which
@@ -140,6 +149,7 @@ void v86_enter(struct v86_state *s);
 void load_idt(struct dtr *idtr);
 void load_tss(u16 selector);
 void flush_tlb(void);               /* reload CR3 to invalidate TLB after a remap */
+void load_cr3(u32 phys);            /* switch page-table view (PD_k <-> PD_u) + flush */
 u32  read_cr2(void);                /* read CR2 (faulting linear address) after #PF */
 extern void gp_stub(void);          /* address used to populate IDT[13] */
 

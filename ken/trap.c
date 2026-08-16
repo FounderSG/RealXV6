@@ -105,3 +105,52 @@ void segflt(unsigned fa, unsigned usp, unsigned uss, unsigned kctx)
 out:
     setpri(u.u_procp);
 }
+
+/*
+ * privflt -- kernel handler for a VMM-reflected user-mode privileged/illegal
+ * operation, the x86 stand-in for the PDP-11 illegal-instruction trap (V6
+ * trap.c cases 1/2/8/9-ish).  Entered on the kernel stack from _privflt_isr
+ * (dmr/m86.asm) with IF=0, mirroring segflt(): kctx is the near address of the
+ * faulting frame, usp/uss the faulting user SP/SS, and type the trap-type code
+ * the VMM stashed (always 1 = privileged op -> SIGINS).
+ *
+ * Unlike segflt there is no grow() branch: a privileged op is never a
+ * recoverable stack fault.  We post the signal and run the same issig/psig
+ * dance -- a caught handler is delivered on the user stack via dupframe; the
+ * default action (core+exit) never returns.  An ignored SIGINS falls through
+ * to a restart, which re-executes the faulting instruction and re-faults
+ * (PDP-11 re-execution semantics).
+ */
+void privflt(unsigned type, unsigned usp, unsigned uss, unsigned kctx)
+{
+    struct ctx *k = (struct ctx *)kctx;
+    int n, sig;
+
+    spl0();
+
+    u.u_ar0[R0] = k->ax;
+    u.u_ar0[R1] = k->bx;
+    u.u_ar0[R2] = k->cx;
+    u.u_ar0[R3] = k->dx;
+
+    switch(type) {                           /* VMM trap-type code -> V6 signal */
+    case 2:  sig = SIGTRC; break;            /* breakpoint (int3) */
+    case 3:  sig = SIGFPT; break;            /* arithmetic (divide / overflow) */
+    case 1:                                  /* privileged operation */
+    case 4:                                  /* illegal instruction (#UD) */
+    default: sig = SIGINS; break;
+    }
+
+    psignal(u.u_procp, sig);
+    if(n = issig()) {
+        if(u.u_signal[n] != 0) {             /* caught: deliver on the user stack */
+            dupframe(kctx, uss, usp);
+            psig();
+            goto out;
+        }
+        psig();                              /* default: core + exit, no return */
+    }
+    dupframe(kctx, uss, usp);                /* ignored signal: restart (will recur) */
+out:
+    setpri(u.u_procp);
+}

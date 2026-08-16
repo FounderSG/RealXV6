@@ -4,6 +4,14 @@
 #define SCHMAG  10
 
 /*
+ * PS image of the code the clock interrupted, captured by _clock_isr.
+ * The VMM stashes the interrupted virtual priority into FLAGS bits 12-14, so
+ * (intr_ps & 0x7000) != 0 is the x86 stand-in for V6's (ps & 0340) != 0 -- the
+ * "was the clock delivered on top of a non-zero-priority section?" test.
+ */
+int intr_ps;
+
+/*
  * clock is called straight from
  * the real time clock interrupt.
  *
@@ -23,6 +31,7 @@ void clock(int mode)
 {
     register struct callo *p1, *p2;
     register struct proc *pp;
+    int ps = intr_ps;    /* interrupted priority (snapshot at entry) */
 
     /*
      * callouts
@@ -38,12 +47,13 @@ void clock(int mode)
     p2->c_time--;
 
     /*
-     * if ps is high, just return
+     * if the clock preempted a non-zero-priority section, defer callouts to a
+     * tick that lands on priority-0 code (V6 (ps&0340), re-based to the x86
+     * FLAGS priority field): a callout may touch a device queue the preempted
+     * section was mid-way through.
      */
-#if PDP11    /* requires nested interrupt support */
-    if((ps&0340) != 0)
+    if((ps & 0x7000) != 0)
         goto out;
-#endif
     /*
      * callout
      */
@@ -78,10 +88,8 @@ out:
     if(++pp->p_cpu == 0)
         pp->p_cpu--;
     if(++lbolt >= HZ) {
-#if PDP11    /* requires nested interrupt support */
-        if((ps&0340) != 0)
+        if((ps & 0x7000) != 0)
             return;
-#endif
         lbolt -= HZ;
         if(++time[1] == 0)
             ++time[0];
