@@ -41,6 +41,7 @@ struct bdevsw bdevsw[] = {
 struct cdevsw cdevsw[] = {
     { klopen, klclose, klread, klwrite, klsgtty },
     { nulldev, nulldev, mmread, mmwrite, mmsgtty },
+    { nulldev, nulldev, rkread, rkwrite, (int (*)(int, int *))nulldev },
     { NULL, NULL, NULL, NULL, NULL }
 };
 
@@ -91,7 +92,7 @@ void main()
     u.u_cdir = iget(rootdev, ROOTINO);
     u.u_cdir->i_flag &= ~ILOCK;
 
-    printk("Unix Ready.\r\n");
+    printf("Unix Ready.\r\n");
 
     /*
      * make init process

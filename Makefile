@@ -5,7 +5,10 @@
 # ==========================================================================
 
 CC = wcc
-CFLAGS = -i=h -ms -0 -s -zls -ecc -bt=dos -ohs -zq -j -zl -fo=.obj
+# Extra defines for a variant build, e.g. the serial-console test kernel:
+#   wmake XCFLAGS=-dKL_BACKEND_UART
+XCFLAGS =
+CFLAGS = -i=h -ms -0 -s -zls -ecc -bt=dos -ohs -zq -j -zl -fo=.obj $(XCFLAGS)
 LD = wlink
 LDFLAGS = SYSTEM dos com OPTION map,nodefaultlibs
 

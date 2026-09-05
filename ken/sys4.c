@@ -241,19 +241,118 @@ profil()
 #endif
 
 /*
- * Get Kernel Address
- * id 0: proc array
- * id 1: swapdev
+ * The 512-byte block below USTACK, holding the argument frame exec builds.
+ * exec caps the strings at 510 bytes but not the vector, so a long enough
+ * argv still runs off the bottom of the block; ps then finds the saved SP
+ * out of range and prints no command, which is the intended degradation.
+ *
+ * Reaching the block below assumes every process image spans it, which holds
+ * only while p_size is always USIZE: grow() is compiled out, so the sole
+ * assignments are proc[0] in main.c and the copy newproc makes from the
+ * parent.  Variable-size images would have to be bounds-checked here.
  */
-void getkaddr(void)
-{
-    int id;
+#define ARGFRAME (USTACK-512)
 
-    id = u.u_ar0[R0];
-    if (id == 0)
-        u.u_ar0[R0] = (int)proc;
-    else if (id == 1)
-        u.u_ar0[R0] = (int)&swapdev;
-    else
-        u.u_ar0[R0] = 0;
+/*
+ * The psinfo() contract with ps.  The 512-byte frame image follows this
+ * struct in the caller's buffer, so ps declares the same fields in the same
+ * order with a trailing stk[512]; a new field belongs ahead of it in both.
+ * ps includes no kernel header, and filling the fields one at a time keeps
+ * the layout of struct proc private to the kernel.  Every scalar is int:
+ * p_pri is signed, and a char field would be signed only while both builds
+ * carry Watcom's -j.
+ */
+struct psbuf
+{
+    int     p_stat;         /* 0 marks a free slot */
+    int     p_flag;
+    int     p_pri;          /* priority, negative is high */
+    int     p_uid;
+    int     p_pid;
+    int     p_ppid;
+    int     p_addr;
+    int     p_wchan;
+    int     stkbase;        /* user address the frame came from, 0 = none */
+};
+
+/*
+ * Report proc[idx] to the caller as a struct psbuf followed by an image of
+ * that process's argument frame.  Returns 0; an index past the end of the
+ * proc table is an EINVAL error, which is how a caller finds the end.
+ */
+void psinfo(void)
+{
+    struct proc *p;
+    struct buf *bp;
+    struct psbuf pb;
+    int idx, oaddr, opid;
+    uint udst, sdst;
+
+    idx = u.u_ar0[R0];
+    udst = (uint)u.u_arg[0];
+    if(idx < 0 || idx >= NPROC) {
+        u.u_error = EINVAL;
+        return;
+    }
+    p = &proc[idx];
+    sdst = udst + sizeof(pb);
+    pb.stkbase = 0;                     /* no frame captured yet */
+
+loop:
+    if(p->p_stat == 0)
+        goto out;
+    oaddr = p->p_addr;
+    opid  = p->p_pid;
+    if(p->p_flag & SLOAD) {
+        /*
+         * In core.  Copy straight from the target's image to the caller's
+         * buffer, both by absolute address: there is no MMU, so a user
+         * address is just an offset from p_addr.  A far memcpy does not
+         * sleep, so it cannot race the swapper.
+         */
+        memcpy(MK_FP(u.u_procp->p_addr*(PAGESIZ/16), sdst),
+               MK_FP((uint)oaddr*(PAGESIZ/16) + (ARGFRAME>>4), 0),
+               512);
+    } else {
+        /*
+         * Swapped out: p_addr is the swap block address, so the frame is
+         * ARGFRAME/512 blocks into the image.  bread sleeps, and the process
+         * may be swapped back in, or its slot reused, while we wait, leaving
+         * the block stale.  Snapshot {p_pid, p_addr, SLOAD} across the read
+         * and retry if it moved; a retry re-reads the slot from the top, so
+         * it also copes with the slot now holding a different process, or
+         * none at all.
+         */
+        bp = bread(swapdev, oaddr + ARGFRAME/512);
+        if(p->p_pid != opid || (p->p_flag&SLOAD) || p->p_addr != oaddr) {
+            brelse(bp);
+            goto loop;
+        }
+        if(bp->b_flags & B_ERROR) {
+            brelse(bp);
+            goto out;               /* unreadable: stkbase stays 0 */
+        }
+        copyout((uint)bp->b_addr, sdst, 512);
+        brelse(bp);
+    }
+    pb.stkbase = ARGFRAME;
+
+    /*
+     * Read the scalars only now that the frame has settled.  bread sleeps,
+     * and a retry can find the slot holding a different process, so a
+     * snapshot taken before the read could describe one process while the
+     * frame beside it came from another.  Nothing below sleeps, so the two
+     * halves always describe the same instant.
+     */
+out:
+    pb.p_stat = p->p_stat;
+    pb.p_flag = p->p_flag & 0377;
+    pb.p_pri = p->p_pri;
+    pb.p_uid = p->p_uid & 0377;
+    pb.p_pid = p->p_pid;
+    pb.p_ppid = p->p_ppid;
+    pb.p_addr = p->p_addr;
+    pb.p_wchan = p->p_wchan;
+    copyout((uint)&pb, udst, sizeof(pb));
+    u.u_ar0[R0] = 0;
 }

@@ -62,7 +62,7 @@ cloop:
 
     /*
      * Gather up name into
-     * user's dir buffer.
+     * users' dir buffer.
      */
 
     cp = &u.u_dbuf[0];
@@ -79,7 +79,7 @@ cloop:
         goto out;
 
     /*
-     * Set up to search a directory
+     * Set up to search a directory.
      */
 
     u.u_offset[1] = 0;
@@ -182,7 +182,7 @@ int schar(void)
 
 /*
  * Return the next character from the
- * user string pointed by dirp.
+ * user string pointed at by dirp.
  */
 int uchar(void)
 {

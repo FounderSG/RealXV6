@@ -7,6 +7,7 @@ bin     d--755 0 0
         chmod       ---755 0 0 ../usr/chmod.com
         cp          ---755 0 0 ../usr/cp.com
         date        ---755 0 0 ../usr/date.com
+        df          ---755 0 0 ../usr/df.com
         echo        ---755 0 0 ../usr/echo.com
         ed          ---755 0 0 ../usr/ed.com
         fib         ---755 0 0 ../usr/fib.com
@@ -40,6 +41,10 @@ dev     d--755 0 0
         rk1     b--644 0 0 0 1
         rk2     b--644 0 0 0 2
         rk3     b--644 0 0 0 3
+        rrk0    c--644 0 0 2 0
+        rrk1    c--644 0 0 2 1
+        rrk2    c--644 0 0 2 2
+        rrk3    c--644 0 0 2 3
         mem     c--644 0 0 1 0
         kmem    c--644 0 0 1 1
         null    c--644 0 0 1 2

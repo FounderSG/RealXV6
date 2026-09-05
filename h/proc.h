@@ -16,7 +16,7 @@ struct  proc
     char    p_time;     /* resident time for scheduling */
     char    p_cpu;      /* cpu usage for scheduling */
     char    p_nice;     /* nice for scheduling */
-    int     p_ttyp;     /* controlling tty */
+    struct tty *p_ttyp; /* controlling tty */
     int     p_pid;      /* unique process id */
     int     p_ppid;     /* process id of parent */
     int     p_addr;     /* address of swappable image */

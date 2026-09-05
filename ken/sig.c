@@ -33,7 +33,7 @@ void signal(struct tty *tp, int sig)
     register struct proc *p;
 
     for(p = &proc[0]; p < &proc[NPROC]; p++)
-        if(p->p_ttyp == (int)tp)
+        if(p->p_ttyp == tp)
             psignal(p, sig);
 }
 

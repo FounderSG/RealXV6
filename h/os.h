@@ -8,6 +8,6 @@
 #include "filsys.h"
 #include "file.h"
 #include "user.h"
-#include "proc.h"
 #include "tty.h"
+#include "proc.h"
 #include "systm.h"

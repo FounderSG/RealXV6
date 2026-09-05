@@ -78,7 +78,7 @@ int nulldev(int d, int flag);
 void bcopy(void *from, void *to, int count);
 
 /* prf.c */
-void printk(char *fmt, ...);
+void printf(char *fmt, ...);
 void panic(char *s);
 void prdev(char *str, int dev);
 void deverror(struct buf *bp, int o1, int o2);
@@ -87,7 +87,7 @@ void deverror(struct buf *bp, int o1, int o2);
 void iinit(void);
 struct buf *alloc(int dev);
 void free(int dev, int bno);
-int badblock(struct filsys *fp, int bn, int dev);
+int badblock(struct filsys *fp, int abn, int dev);
 struct inode *ialloc(int dev);
 void ifree(int dev, int ino);
 struct filsys *getfs(int dev);
@@ -121,6 +121,7 @@ void clrbuf(struct buf *bp);
 void binit(void);
 void mapfree(struct buf *bp);
 void mapalloc(struct buf *bp);
+void physio(void (*strat)(struct buf *), struct buf *abp, int dev, int rw);
 int swap(int blkno, int coreaddr, int count, int rdflg);
 void bflush(int dev);
 void geterror(struct buf *bp);
@@ -136,6 +137,8 @@ void wdir(struct inode *ip);
 /* rdwri.c */
 void readi(struct inode *ip);
 void writei(struct inode *ip);
+int max(uint a, uint b);
+int min(uint a, uint b);
 void iomove(struct buf *bp, int o, int n, int flag);
 
 /* fio.c */
@@ -197,7 +200,7 @@ void chown(void);
 void ssig(void);
 void kill(void);
 void times(void);
-void getkaddr(void);
+void psinfo(void);
 
 /* slp.c */
 void swtch(void);
@@ -262,6 +265,8 @@ int mmsgtty(int dev, int *v);
 /* rk.c */
 void rkstrategy(struct buf *abp);
 void rkintr(void);
+int rkread(int dev);
+int rkwrite(int dev);
 
 /* m86.asm */
 void memcpy(void far *dst, const void far *src, uint n);
@@ -285,13 +290,14 @@ void spl1(void);
 void spl5(void);
 void spl6(void);
 void spl7(void);
-char fubyte(int addr);
+int fubyte(int addr);
 int fuword(int addr);
 int subyte(int addr, char ch);
 int suword(int addr, int value);
 void copyseg(uint src, uint dst);
 void clearseg(uint dst);
 void copyout(uint srcAddr, uint dstAddr, int iSize);
+void copyin(uint srcAddr, uint dstAddr, int iSize);
 void dpadd(int x[2], int y);
 int dpcmp(int xh, int xl, int yh, int yl);
 int ldiv(int x, int y);
@@ -302,7 +308,7 @@ void outportb(unsigned port, unsigned char val);
 unsigned inport(unsigned port);
 unsigned char inportb(unsigned port);
 void idle(void);
-void putck(char c);
+void putchar(char c);
 void pc_init(void);
 
 /* kbd.c */

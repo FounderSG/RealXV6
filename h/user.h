@@ -24,7 +24,7 @@ struct user
     char    u_rgid;         /* real group id */
     struct proc *u_procp;   /* pointer to proc structure */
     char    *u_base;        /* IO base */
-    int     u_count;        /* bytes remaining for IO */
+    uint    u_count;        /* bytes remaining for IO */
     int     u_offset[2];    /* offset in file for IO */
     struct inode *u_cdir;   /* cwd inode */
     char    u_dbuf[DIRSIZ]; /* path buffer */

@@ -2,8 +2,6 @@
 #define _PC_H       1
 
 #define NULL        0
-#define min(a,b)    ((a)<(b)?(a):(b))
-#define max(a,b)    ((a)<(b)?(b):(a))
 
 #define FP_OFF(__p) ((unsigned)(__p))
 #define FP_SEG(__p) ((unsigned)((unsigned long)(void __far*)(__p) >> 16))
@@ -11,8 +9,14 @@
 #define disable()   { _asm cli }
 #define enable()    { _asm sti }
 
-#define xKL_BACKEND_UART
+/*
+ * Console backend.  The default is the PC console: PS/2 keyboard in, VGA out.
+ * Defining KL_BACKEND_UART on the compiler command line (-dKL_BACKEND_UART)
+ * selects the COM1 serial console instead.
+ */
+#ifndef KL_BACKEND_UART
 #define KL_BACKEND_KBD
+#endif
 
 typedef unsigned uint;
 

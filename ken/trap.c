@@ -52,7 +52,7 @@ void trap_epilogue(void)
 void trap(void)
 {
     register struct sysent *callp;
-    callp = &sysent[u.u_ar0[R3]];
+    callp = &sysent[u.u_ar0[R3]&077];
 
     u.u_dirp = u.u_arg[0];
     trap1(callp->call);

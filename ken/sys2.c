@@ -1,7 +1,3 @@
-/*
- * sys2.c
- * file i/o syscalls
- */
 #include "os.h"
 
 /*

@@ -5,6 +5,16 @@
  * 31 Jan 2026 Initial port by Greg Haerr
  *  Adds swap blocks to proto file and extends filesystem image for it
  */
+/*
+ * Open binary descriptors with O_BINARY so the image and the packed binaries
+ * are not mangled by the host's text-mode translation (CRLF / 0x1A) on Windows.
+ * Included before the "int -> short" redefinition so the header sees real int;
+ * O_BINARY is 0 on POSIX, where the flag is a no-op.
+ */
+#include <fcntl.h>
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
 #define uint    unsigned int    /* original source used 'char *' */
 #define int     short           /* int -> short for host compilation */
 #define debug(...)
@@ -91,12 +101,12 @@ char **argv;
 		}
 	}
 	proto = argv[2];
-	fso = creat(fsys, 0666);
+	fso = open(fsys, O_WRONLY|O_CREAT|O_TRUNC|O_BINARY, 0666);
 	if(fso < 0) {
 		printf("%s: cannot create\n", fsys);
 		exit(1);
 	}
-	fsi = open(fsys, 0);
+	fsi = open(fsys, O_RDONLY|O_BINARY);
 	if(fsi < 0) {
 		printf("%s: cannot open\n", fsys);
 		exit(1);
@@ -126,7 +136,7 @@ char **argv;
 	 */
 
 	getstr();
-	f = open(string, 0);
+	f = open(string, O_RDONLY|O_BINARY);
 	if(f < 0) {
 		printf("%s: cannot  open init\n", string);
 		goto f2;
@@ -259,7 +269,7 @@ struct inode *par;
 
 		getstr();
 		debug("FILE '%s'\n", string);
-		f = open(string, 0);
+		f = open(string, O_RDONLY|O_BINARY);
 		if(f < 0) {
 			printf("%s: cannot open\n", string);
 			break;

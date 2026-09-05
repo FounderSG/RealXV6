@@ -102,14 +102,18 @@ void exec(void)
      * initialize stack segment
      */
     cp = bp->b_addr;
-    /* argc, argv, [arg0, arg1, .. ] [strings] */
-    ap = (USTACK-2) - nc - na*2 - 4;
-    suword(USTACK-2, ap);        /* user sp */
+    /* argc, argv, [arg0, arg1, .., 0] [strings] */
+    /*
+     * The top word of the stack is left unused so the SP holder below it
+     * sits at a fixed offset in the 512-byte frame image psinfo hands ps.
+     */
+    ap = (USTACK-4) - nc - na*2 - 6;
+    suword(USTACK-4, ap);        /* user sp */
     ts = ap - 24;
     suword(ap, na);              /* argc */
     suword(ap + 2, ap + 4);      /* argv */
     ap += 4;
-    c = (USTACK-2) - nc;
+    c = (USTACK-4) - nc;
     while(na--) {
         suword(ap, c);
         ap += 2;
@@ -117,6 +121,9 @@ void exec(void)
             subyte(c++, *cp);
         while(*cp++);
     }
+    suword(ap, 0);               /* argv[argc] = NULL; exec's own arg walk
+                                  * (and any program passing main's argv on)
+                                  * relies on the vector being terminated */
 
     ds = u.u_procp->p_addr*(PAGESIZ/16);
     suword(ts + 0, ds);           /* ds */
@@ -161,7 +168,7 @@ bad:
  */
 void rexit(void)
 {
-    u.u_arg[0] = u.u_ar0[R0];
+    u.u_arg[0] = u.u_ar0[R0] << 8;
     exit();
 }
 

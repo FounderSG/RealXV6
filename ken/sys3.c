@@ -1,7 +1,3 @@
-/*
- * sys3.c
- * file and mount syscalls
- */
 #include "os.h"
 
 /*

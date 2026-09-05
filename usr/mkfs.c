@@ -403,7 +403,7 @@ int *bf;
 {
 	int n;
 
-	seek(fsi, bno*512, 0);
+	seek(fsi, bno, 3);
 	n = read(fsi, bf, 512);
 	if(n != 512) {
 		printf("read error: %d\n", bno);
@@ -423,7 +423,7 @@ int *bf;
 {
 	int n;
 
-	seek(fso, bno*512, 0);
+	seek(fso, bno, 3);
 	n = write(fso, bf, 512);
 	if(n != 512) {
 		printf("write error: %d\n", bno);

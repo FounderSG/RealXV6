@@ -3,7 +3,6 @@
 #define UMODE   0170000
 #define SCHMAG  10
 
-int kcount = 0, ucount = 0;
 /*
  * clock is called straight from
  * the real time clock interrupt.
@@ -25,8 +24,6 @@ void clock(int mode)
     register struct callo *p1, *p2;
     register struct proc *pp;
 
-    if(mode==0) kcount++;
-    else ucount++;
     /*
      * callouts
      * if none, just return
@@ -109,11 +106,7 @@ out:
             runin = 0;
             wakeup(&runin);
         }
-    }
-    if((lbolt&7)==0) {
-        runrun++;
-        if(mode!=0)
-        {
+        if(mode!=0) {
             if(issig())
                 psig();
             setpri(u.u_procp);

@@ -42,9 +42,9 @@ void spl7(void)
 
 #define user_space_io_pointer MK_FP(u.u_procp->p_addr*(PAGESIZ/16), addr)
 
-char fubyte(int addr)
+int fubyte(int addr)
 {
-    return *(char far *)user_space_io_pointer;
+    return *(char far *)user_space_io_pointer & 0377;
 }
 
 int fuword(int addr)
@@ -79,6 +79,14 @@ void clearseg(uint dst)
 void copyout(uint srcAddr, uint dstAddr, int iSize)
 {
     memcpy(MK_FP(u.u_procp->p_addr*(PAGESIZ/16), dstAddr), MK_FP(core_cs, srcAddr), iSize);
+}
+
+/*
+ * User to kernel, the mirror of copyout, same (src, dst, size) order.
+ */
+void copyin(uint srcAddr, uint dstAddr, int iSize)
+{
+    memcpy(MK_FP(core_cs, dstAddr), MK_FP(u.u_procp->p_addr*(PAGESIZ/16), srcAddr), iSize);
 }
 
 typedef union {
@@ -164,7 +172,7 @@ void idle(void)
     _asm cli
 }
 
-void putck(char c)
+void putchar(char c)
 { 
 #if defined(KL_BACKEND_UART)
     uart_putc(c);
