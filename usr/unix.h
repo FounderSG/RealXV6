@@ -119,6 +119,7 @@ int sleep(int nTicks);
 int sync(void);
 int kill(int pid, int signalNo);
 int psinfo(int index, void *buf);
+int halt(void);
 int dup(int fd);
 int pipe(int fd[2]);
 int setgid(int gid);

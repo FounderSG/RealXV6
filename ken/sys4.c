@@ -243,26 +243,54 @@ profil()
 /*
  * psinfo - process status query (replaces the old getkaddr peek).
  *
- * Copy proc[index] out to the user buffer, followed by a 512-byte image of the
- * top of that process's user stack (the top 512-byte block), where exec leaves the
- * argument vector.  ps assembles the COMMAND column from that image, so it never
- * reads /dev/mem or /dev/kmem and never needs to know the physical layout: the
+ * Fill the caller's buffer with the struct below, followed by a 512-byte image
+ * of the top of that process's user stack, where exec leaves the argument
+ * vector.  ps assembles the COMMAND column from that image, so it never reads
+ * /dev/mem or /dev/kmem and never needs to know the physical layout: the
  * kernel, which owns the mapping, resolves it here.  This is also what lets the
  * data segment be mapped sparsely -- ps no longer assumes a flat p_addr image.
  *
- * The stack image is only meaningful for separated-I&D (EXE) processes; single-
- * segment images (icode, proc 0/1) carry p_tsize==0 and get only the struct.
+ * ps carries its own copy of the struct, extended with the trailing image, and
+ * includes no kernel header at all; a new field belongs ahead of the image in
+ * both.  Filling the fields one at a time keeps struct proc private to the
+ * kernel.  Every scalar is int: p_pri is signed, and a char field would be
+ * signed only while both builds carry Watcom's -j.  R0 returns 0; an index past
+ * the end of the proc table is an EINVAL error, which is how ps finds the end.
+ *
+ * stkbase reports the user address the image came from, or 0 when no frame was
+ * captured: a free slot, a process carrying p_tsize==0, or an unreadable swap
+ * block.  p_tsize==0 means a zombie -- exit clears it along with the text and
+ * leaves p_addr pointing at a one-block image of u, which holds no argument
+ * frame -- or proc 0, which never exec'd (exec rejects an EXE with no text, so
+ * every other live process has one).  ps consults stkbase before parsing, so a
+ * stale image left in the caller's buffer by an earlier call is never mistaken
+ * for this process's arguments.
  *
  * In core the copy is a non-blocking far memcpy, so it cannot race the swapper.
  * For a swapped-out process the stack block is read from the swap device, which
- * sleeps; the process may be swapped back in (or the slot reused) while we sleep,
- * leaving the block stale.  Snapshot {p_pid,p_addr,SLOAD} across the bread and
- * retry if it moved -- on the retry it is in core and the read is race-free.
+ * sleeps; the process may be swapped back in, or the slot reused, while we
+ * sleep, leaving the block stale.  Snapshot {p_pid,p_addr,SLOAD} across the
+ * bread and retry if it moved; a retry re-reads the slot from the top, so it
+ * also copes with the slot now holding a different process, or none at all.
  */
+struct psbuf
+{
+    int     p_stat;         /* 0 marks a free slot */
+    int     p_flag;
+    int     p_pri;          /* priority, negative is high */
+    int     p_uid;
+    int     p_pid;
+    int     p_ppid;
+    int     p_addr;
+    int     p_wchan;
+    int     stkbase;        /* user address the frame came from, 0 = none */
+};
+
 void psinfo(void)
 {
     struct proc *p;
     struct buf *bp;
+    struct psbuf pb;
     int idx, oaddr, opid, osize;
     uint udst, sdst;
 
@@ -273,16 +301,12 @@ void psinfo(void)
         return;
     }
     p = &proc[idx];
-    if(copyout((uint)p, udst, sizeof(struct proc))) {
-        u.u_error = EFAULT;
-        return;
-    }
-    u.u_ar0[R0] = p->p_stat;
-    if(p->p_stat == 0 || p->p_tsize == 0)
-        return;                         /* no EXE argument frame */
-    sdst = udst + sizeof(struct proc);
+    sdst = udst + sizeof(pb);
+    pb.stkbase = 0;                     /* no frame captured yet */
 
 loop:
+    if(p->p_stat == 0 || p->p_tsize == 0)
+        goto out;                       /* free slot, or no EXE frame */
     oaddr = p->p_addr;
     osize = p->p_size;
     opid  = p->p_pid;
@@ -310,6 +334,10 @@ loop:
             brelse(bp);                 /* swapped in while we slept; reread */
             goto loop;
         }
+        if(bp->b_flags & B_ERROR) {
+            brelse(bp);
+            goto out;                   /* unreadable: stkbase stays 0 */
+        }
         if(copyout((uint)bp->b_addr, sdst, 512)) {
             brelse(bp);
             u.u_error = EFAULT;
@@ -317,4 +345,80 @@ loop:
         }
         brelse(bp);
     }
+    pb.stkbase = (USTACK-2) & ~0x1FF;   /* 512-aligned base of the top block */
+
+    /*
+     * Read the scalars only now that the frame has settled.  bread sleeps,
+     * and a retry can find the slot holding a different process, so a
+     * snapshot taken before the read could describe one process while the
+     * frame beside it came from another.  Nothing below sleeps, so the two
+     * halves always describe the same instant.
+     */
+out:
+    pb.p_stat = p->p_stat;
+    pb.p_flag = p->p_flag & 0377;
+    pb.p_pri = p->p_pri;
+    pb.p_uid = p->p_uid & 0377;
+    pb.p_pid = p->p_pid;
+    pb.p_ppid = p->p_ppid;
+    pb.p_addr = p->p_addr;
+    pb.p_wchan = p->p_wchan;
+    if(copyout((uint)&pb, udst, sizeof(pb))) {
+        u.u_error = EFAULT;
+        return;
+    }
+    u.u_ar0[R0] = 0;
+}
+
+/*
+ * halt -- write the buffer cache out to the disk, wait for the disk to go
+ * quiet, then stop the processor.  This is the stopunix() Peter Collinson
+ * added to sys4.c in 1976 to support killunix, kept with his V6 sources at
+ * https://github.com/pcollinson/unixv6-extras (halt/), and it is a system
+ * call for a reason: sync(2) only *starts* the writes.  update() ends in
+ * bflush(), which marks each delayed-write buffer B_ASYNC, hands it to the
+ * driver and returns with the transfers still queued -- a program that called
+ * sync() and then stopped the machine would leave behind exactly the
+ * corruption a clean shutdown is meant to prevent.  So the flush and the stop
+ * happen here, without going back to user mode in between.
+ *
+ * What to wait ON is the subtlety.  Not B_BUSY: a buffer is busy from
+ * notavail() until whoever took it gives it back, and two of them are never
+ * given back at all -- iinit() holds the root superblock in mount[0].m_bufp
+ * and smount() holds one per mounted filesystem.  Waiting for "no buffer is
+ * busy" hangs on the first of those.  B_ASYNC is the right flag: bflush()
+ * sets it on exactly the buffers handed to the driver without waiting, and
+ * brelse() clears it when iodone() gives one back, so B_ASYNC means "in
+ * flight".  Reads and synchronous writes need no waiting -- whoever issued
+ * them is already in iowait().  brelse() wakes us through B_WANTED.
+ *
+ * EBUSY when an update() is already running: updlock would make ours a no-op
+ * (update() returns at once) and we would stop on a cache nobody flushed.
+ * The caller retries; /bin/halt does.
+ */
+void halt(void)
+{
+    struct buf *bp;
+
+    if(!suser())
+        return;
+    if(updlock) {
+        u.u_error = EBUSY;
+        return;
+    }
+    printf("halt: flushing\r\n");
+    update();
+    for(bp = &buf[0]; bp < &buf[NBUF]; bp++) {
+again:
+        spl6();
+        if(bp->b_flags & B_ASYNC) {
+            bp->b_flags |= B_WANTED;
+            sleep(bp, PRIBIO);
+            spl0();
+            goto again;
+        }
+        spl0();
+    }
+    printf("safe to poweroff\r\n");
+    stopit();
 }

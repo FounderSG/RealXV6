@@ -1,3 +1,5 @@
+#include "pc.h"     /* MK_FP/FP_SEG/FP_OFF for the transfer cursor below */
+
 /* Important bits in the status register of an ATA controller.
    See ATA/ATAPI-4 spec, section 7.15.6 */
 #define IDE_BSY 0x80
@@ -73,6 +75,16 @@ void ideintr(void)
 {
     int i;
 
+    /*
+     * Nothing outstanding.  Without this an unexpected interrupt would read a
+     * sector into the cursor sitting one past the end of the finished transfer
+     * and then call rkintr again, completing a request that never started.
+     * rkintr has the same guard on rktab.d_active.  A zero-sector request
+     * cannot reach here: all three branches of devstart produce at least one.
+     */
+    if (io_count <= 0)
+        return;
+
     io_sector++;
     io_count--;
 
@@ -81,7 +93,17 @@ void ideintr(void)
         for (i = 0; i < 256; i++)
             io_buf[i] = inport(0x1f0);
     }
-    io_buf += 256;
+    /*
+     * Advance one sector by the SEGMENT, not the offset.  16-bit far pointer
+     * arithmetic only touches the offset, so "io_buf += 256" wraps at the 64K
+     * segment boundary and the tail of a longer transfer overwrites its own
+     * head.  devstart hands a whole swap image to one ideio: 17 pages
+     * (h/param.h: u + UDPAGES) = 136 sectors already crosses the boundary, and
+     * swgrow's inflated round trip (ken/slp.c) asks for more still.
+     * 32 paragraphs are 512 bytes and the offset never changes, so this
+     * advance cannot wrap whatever offset the transfer started at.
+     */
+    io_buf = (int far *)MK_FP(FP_SEG(io_buf) + 32, FP_OFF(io_buf));
 
     if (io_count <= 0)
     {

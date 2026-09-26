@@ -1,7 +1,7 @@
 #include "os.h"
 
 /*
- * The u-area is a VMM paging window (PT0[0x1D] @ near 0xD000): while a process
+ * The u-area is a VMM paging window (PT0[0x1F] @ near 0xF000): while a process
  * runs, the window maps its own core page 15, so every write to u lands
  * directly in that page.  savu therefore has nothing to copy; retu just remaps
  * the window to the incoming process's u-area page (core page 15 = p_addr+15).
@@ -391,6 +391,23 @@ void idle(void)
     _asm sti
     _asm hlt
     _asm cli
+}
+
+/*
+ * Stop the processor.  The x86 stand-in for the reset/halt pair Peter
+ * Collinson put at "stopit" in m40.s (see halt() in ken/sys4.c): mask every
+ * IRQ at both 8259s, clear IF and hang on hlt.  halt() calls it once the
+ * disks have gone quiet, so nothing -- not the clock, not a drive completion
+ * -- can run again and touch a disk between here and the power switch.
+ */
+void stopit(void)
+{
+    outportb(0x21, 0xff);       /* master 8259 IMR: mask IRQ0-7  */
+    outportb(0xa1, 0xff);       /* slave 8259 IMR:  mask IRQ8-15 */
+    _asm cli
+    for(;;) {
+        _asm hlt
+    }
 }
 
 void putchar(char c)

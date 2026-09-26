@@ -63,8 +63,7 @@
 #define PAGESIZ 4096    /* page size */
 #define USPACE  0x20    /* start of user space page (windows live in the adapter holes above 640K) */
 #define WINSEG  0xA000  /* EXE code-window selector (VMM WIN_TEXT @ linear 0xA0000, VGA-graphics hole) */
-#define WDSEG   0xD000  /* EXE data-window selector (VMM WIN_DATA @ linear 0xD0000, option-ROM hole;
-                         * unrelated to the kernel's u window at DS:0xD000 = linear 0x1D000) */
+#define WDSEG   0xD000  /* EXE data-window selector (VMM WIN_DATA @ linear 0xD0000, option-ROM hole) */
 #define USTACK  0xFFFE  /* top of user stack.  The top 2 bytes (0xFFFE-0xFFFF)
                          * are left unused so the arg-frame image psinfo/ps read
                          * stays in the top 512-byte block of the stack page. */

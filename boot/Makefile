@@ -4,6 +4,8 @@
 # that is not compatible with GNU make or Microsoft nmake.
 # ==========================================================================
 
+PYTHON = python
+
 all : .symbolic Unix360.img unix0_rk.img unix.img
 
 # Build boot sector and generate floppy image
@@ -37,12 +39,11 @@ Unix360-test.img: ../vmm/vmm.bin ../vmm/guest_test.com bootsect.asm
 	dd if=../vmm/vmm.bin of=Unix360-test.img conv=notrunc bs=512 seek=1
 	dd if=../vmm/guest_test.com of=Unix360-test.img conv=notrunc bs=512 seek=33
 
-../tools/mkfs: ../tools/mkfs.c
-	gcc -Wno-implicit-function-declaration -Wno-implicit-int -Wno-parentheses -Wno-return-type -Wno-incompatible-pointer-types ../tools/mkfs.c -o ../tools/mkfs
-
-unix.img: proto ../tools/mkfs
-	../tools/mkfs unix.img proto
-	dd if=/dev/zero of=unix.img bs=1 count=1 seek=10321919 conv=notrunc
+# --pad extends the image to what the IDE geometry expects; the V6 filesystem
+# is only the first fsize+swap blocks of it. Override PYTHON if python3 is the
+# name on your host: wmake PYTHON=python3
+unix.img: proto ../tools/mkfs.py
+	$(PYTHON) ../tools/mkfs.py unix.img proto --pad 10321920
 
 b: .symbolic Unix360.img unix.img
 	bochs -qf bochs.rc
@@ -71,4 +72,4 @@ q-test: .symbolic Unix360-test.img
 	qemu-system-i386 -curses -serial stdio -drive file=Unix360-test.img,format=raw,if=floppy -drive file=Unix360-test.img,format=raw,if=ide -snapshot -boot a
 
 clean: .symbolic
-	rm -f *.obj *.err *.com *.img *.txt ../tools/mkfs
+	rm -f *.obj *.err *.com *.img *.txt ../tools/mkfs ../tools/mkfs.exe

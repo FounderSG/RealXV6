@@ -27,7 +27,8 @@ read_vmm:
         jc read_failed
         add bx, 512
         inc si
-        cmp si, 97              ; sectors 1..96 (vmm.bin 1..32 + unix.com 33..96)
+        cmp si, 128             ; sectors 1..127 (vmm.bin 1..32 + unix.com 33..127)
+                                ; 127 is the ceiling: bx wraps at 128*512 = 0x10000
         jb read_vmm
 
         ; Far-jump to VMM entry at 0x0800:0x0000.

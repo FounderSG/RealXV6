@@ -19,7 +19,14 @@ typedef union header Header;
 
 static Header base;
 static Header *freep;
-static char heap[4096 * sizeof(Header)];
+
+/*
+  Units to ask sbrk for at a minimum.  The break grows up into the hole
+  between the bss and the stack, which is why the arena is no longer a
+  static array: reserving one cost every program 16KB of bss -- four pages
+  of core, and four of its swap image -- whether it called malloc or not.
+*/
+#define NALLOC 1024
 
 void
 free(void *ap)
@@ -44,12 +51,20 @@ free(void *ap)
 }
 
 static Header*
-morecore(void)
+morecore(uint nu)
 {
+  char *p;
   Header *hp;
-  
-  hp = (Header*)heap;
-  hp->s.size = sizeof(heap) / sizeof(Header);
+
+  if(nu < NALLOC)
+    nu = NALLOC;
+  if(nu > 32767/sizeof(Header))     /* sbrk takes a signed increment */
+    return 0;
+  p = sbrk(nu * sizeof(Header));
+  if(p == (char*)-1)
+    return 0;
+  hp = (Header*)p;
+  hp->s.size = nu;
   free((void*)(hp + 1));
   return freep;
 }
@@ -78,7 +93,7 @@ malloc(uint nbytes)
       return (void*)(p + 1);
     }
     if(p == freep)
-      if((p = morecore()) == 0)
+      if((p = morecore(nunits)) == 0)
         return 0;
   }
 }

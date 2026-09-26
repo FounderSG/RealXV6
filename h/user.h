@@ -46,27 +46,33 @@ struct user
     int u_ar0[4];           /* users saved register R0 - R3 */
     char u_intflg;          /* catch intr from sys */
                             /* kernel stack per user: extends from
-                             * u + PAGESIZ (0xE000) backward, not to reach here */
+                             * u + PAGESIZ (0x10000, the segment top)
+                             * backward, not to reach here */
 };
 
 /* The u-area of the current process is a VMM paging WINDOW at a fixed near
- * aperture (offset UADDR=0xD000 = linear page 0x1D in the kernel segment), not
- * a linker-placed global.  The VMM remaps that page to the running process's
- * u page UPAGE(p) on each context switch (retu -> sureg -> HVC_SUREG); UPAGE is
- * block slot 0 (= p_addr) for an EXE process and p_addr+USIZE-1 for a single-
- * seg one; no bytes are copied.  The struct holds only the u data fields; the
- * kernel stack occupies the rest of the page, growing down from UADDR+0x1000
- * (0xE000).
+ * aperture (offset UADDR=0xF000 = linear page 0x1F, the LAST page of the
+ * kernel segment), not a linker-placed global.  The VMM remaps that page to
+ * the running process's u page UPAGE(p) on each context switch (retu -> sureg
+ * -> HVC_SUREG); UPAGE is block slot 0 (= p_addr) for an EXE process and
+ * p_addr+USIZE-1 for a single-seg one; no bytes are copied.  The struct holds
+ * only the u data fields; the kernel stack occupies the rest of the page,
+ * growing down from UADDR+0x1000, which wraps to 0x0000: SP starts at 0 and
+ * the first push lands at 0xFFFE.
+ * On the last page the aperture coincides with where the u page physically
+ * sits (core page 15 of the block), so for proc[0] the window IS the identity
+ * mapping; and everything below it, 0x0100..0xEFFF, is linkable kernel
+ * text+data+bss.
  * STARTX maps the window to proc[0]'s u page, then zeroes it, at boot. */
-#define UADDR 0xD000
+#define UADDR 0xF000
 #define u (*(struct user *)UADDR)
 
 /* Top two words of the kernel stack = the entry (return) SS:SP for the current
  * kernel entry.  SwitchToKernelStack pushes them at the page top;
  * exec/segflt/psig rewrite them to redirect the trap return.  Fixed apertures,
  * independent of sizeof(u) (they replace the old u_stack[KSSIZE-1:-2]). */
-#define uret_ss (*(int *)(UADDR + 0x1000 - 2))   /* 0xDFFE */
-#define uret_sp (*(int *)(UADDR + 0x1000 - 4))   /* 0xDFFC */
+#define uret_ss (*(int *)0xFFFE)   /* UADDR + 0x1000 - 2, at the segment top */
+#define uret_sp (*(int *)0xFFFC)   /* UADDR + 0x1000 - 4 */
 
 /* u_error codes */
 #define EFAULT  106

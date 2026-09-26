@@ -9,8 +9,10 @@ EXTRN   _intr_ps: word
 
 DGROUP  GROUP _TEXT,_DATA,_BSS,_BSSEND
 
-; Fixed near aperture for the current process's u-area (see h/user.h).
-U_AREA  EQU   0D000h
+; Fixed near aperture for the current process's u-area (see h/user.h).  It is
+; the LAST page of the segment, so the stack top U_AREA+4096 wraps to 0: SP
+; starts at 0 and the first push lands at 0FFFEh.
+U_AREA  EQU   0F000h
 
     .MODEL  TINY
     .CODE
@@ -20,10 +22,11 @@ STARTX          PROC    NEAR
     mov     ds, ax
     mov     es, ax
 
-; Map WIN_U (PT0[0x1D] @ linear 0xD000) to proc[0]'s u-area page BEFORE SP
-; moves into the window.  proc[0].p_addr = core_cs/256 = 0x10, so its u-area
-; (core page 15) = 0x10+15 = 0x1F.  Build a sureg_desc on the current stack
-; (SS=CS=0x1000, SP=0xFFFE) and call HVC_SUREG; int 80h does not push to the
+; Map WIN_U (PT0[0x1F] @ linear 0x1F000) to proc[0]'s u-area page.
+; proc[0].p_addr = core_cs/256 = 0x10, so its u-area (core page 15) = 0x10+15
+; = 0x1F -- the window's own identity page, so the entry stack (SS=CS=0x1000,
+; SP=0xFFFE), which already sits in the window, does not move under us.  Build
+; a sureg_desc on that stack and call HVC_SUREG; int 80h does not push to the
 ; guest stack, so this is safe.
     sub     sp, 14          ; allocate sureg_desc (7 words) on the entry stack
     mov     bp, sp
@@ -117,7 +120,7 @@ SwitchToKernelStack MACRO
     mov ax, cs
     mov ss, ax
     mov ax, U_AREA
-    add ax, 4096
+    add ax, 4096            ; wraps to 0: the stack top is the segment top
     mov sp, ax
     push dx
     push cx
@@ -386,9 +389,9 @@ _bios_putc  endp
 ; Entered via VMM iretd on the KERNEL stack (the user SP may be inside the
 ; not-present stack gap, so it cannot be used).  SS = GUEST_CS, DS/ES and the
 ; GP registers hold the faulting user state, IF=0, VM=1.  The VMM pushed, at
-; the top of the u-area kernel stack (growing down from 0xE000):
-;   0xDFF4 ip  0xDFF6 cs  0xDFF8 flags   (user iret frame; SP enters here)
-;   0xDFFA fault_off  0xDFFC user_sp  0xDFFE user_ss
+; the top of the u-area kernel stack (growing down from the segment top):
+;   0xFFF4 ip  0xFFF6 cs  0xFFF8 flags   (user iret frame; SP enters here)
+;   0xFFFA fault_off  0xFFFC user_sp  0xFFFE user_ss
 ; EnterISR completes a struct ctx below the iret frame; segflt() grows the
 ; stack (restart) or posts SIGSEG, leaving the return SS:SP in
 ; uret_ss/uret_sp and a ctx to IRET through on the user stack.
@@ -402,7 +405,7 @@ _segflt_isr     proc    near
     push    word ptr [bp+24]        ; fault_off
     call    near ptr _segflt        ; segflt(fault_off, user_sp, user_ss, kctx)
     ; segflt set uret_ss/uret_sp = return ss:sp; return to user through it.
-    mov     sp, U_AREA + 4096 - 4   ; -> uret_sp slot (0xDFFC)
+    mov     sp, 0FFFCh              ; -> uret_sp slot (U_AREA + 4096 - 4)
     SwitchToUserStack               ; ss:sp = uret_ss:uret_sp
     UExitISR                        ; pop ctx regs; URET to user
 _segflt_isr     endp
@@ -410,7 +413,7 @@ _segflt_isr     endp
 ; VMM redirect target for a user-mode privileged/illegal operation (the x86
 ; stand-in for the PDP-11 illegal-instruction / BPT / EMT / IOT traps): the
 ; SIGINS channel.  Entered via VMM iretd on the KERNEL stack exactly like
-; _segflt_isr, but the word at 0xDFFA is a trap TYPE code (see privflt_trap)
+; _segflt_isr, but the word at 0xFFFA is a trap TYPE code (see privflt_trap)
 ; instead of a fault offset, and the pushed user ip is the faulting instruction
 ; itself (re-executed on a caught return, per PDP-11 semantics).
 _privflt_isr    proc    near
@@ -423,7 +426,7 @@ _privflt_isr    proc    near
     push    word ptr [bp+24]        ; trap type code
     call    near ptr _privflt       ; privflt(type, user_sp, user_ss, kctx)
     ; privflt set uret_ss/uret_sp = return ss:sp; return to user through it.
-    mov     sp, U_AREA + 4096 - 4   ; -> uret_sp slot (0xDFFC)
+    mov     sp, 0FFFCh              ; -> uret_sp slot (U_AREA + 4096 - 4)
     SwitchToUserStack               ; ss:sp = uret_ss:uret_sp
     UExitISR                        ; pop ctx regs; URET to user
 _privflt_isr    endp

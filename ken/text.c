@@ -173,16 +173,20 @@ out:
          * Text not in core.  V6 swaps the caller out and lets sched page
          * the text in next to it (PDP-11 contiguity); behind WIN_TEXT the
          * block is position independent, so read it back in place when
-         * core is available.  With no core, fall back to the V6
+         * core is available.  SLOCK during that read: sched would see
+         * x_ccount still 0 at swap-in and load the text a second time
+         * over this one.  With no core, fall back to the V6
          * coroutine: swap self out with SSWAP; sched reloads the text and
          * takes the in-core reference at swap-in.  (The caller's OLD text
          * keeps its in-core reference while we are out -- conservative,
          * and rebalanced by exec's xfree at the commit point.)
          */
         if((ta = malloc(coremap, xp->x_size)) != NULL) {
+            u.u_procp->p_flag |= SLOCK;
             if(swap(xp->x_daddr, ta, xp->x_size, B_READ))
                 panic("swap error");
             xp->x_caddr = ta;
+            u.u_procp->p_flag &= ~SLOCK;
         } else {
             if(save(u.u_ssav) == 0) {
                 while((ta = malloc(swapmap,

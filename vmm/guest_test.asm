@@ -544,7 +544,7 @@ stub_ide endp
 ;   Seed two physical pages (0x40000, 0x50000) with distinct words, then point
 ;   WIN_TEXT (linear 0xA0000 = seg 0xA000) at each via a mode=1 sureg_desc and
 ;   read back through the window. The value read must follow the remap, proving
-;   PTE rewrite + TLB flush work. WIN_U is pointed at its identity page (0x1D)
+;   PTE rewrite + TLB flush work. WIN_U is pointed at its identity page (0x1F)
 ;   and WIN_DATA is left empty (dsize=ssize=0); neither is touched here.
 ;   Two verdicts: T13 (expect 0xAAAA), T14 (expect 0x5555).
 ; ============================================================================
@@ -602,15 +602,17 @@ ide_status      db 0
 ; sureg_desc for T13/T14: {taddr, tsize, daddr, dsize, ssize, uaddr, mode}.
 ; mode=1 programs all three windows: WIN_TEXT gets taddr (the page under
 ; test), WIN_DATA is left empty (dsize=ssize=0), WIN_U is re-pointed at its
-; identity page 0x1D so linear 0xD000 does not move.  daddr must be nonzero
-; (any real page; unused since dsize=0) to pass the VMM's null-page tripwire.
+; identity page 0x1F so linear 0x1F000 does not move -- our own stack (entry
+; SP=0xFFFE) lives in that page, so any other value would pull it out from
+; under us.  daddr must be nonzero (any real page; unused since dsize=0) to
+; pass the VMM's null-page tripwire.
 sureg_buf:
 sureg_taddr     dw 0            ; taddr: set per sub-test
                 dw 1            ; tsize = 1 page
                 dw 040h         ; daddr: nonzero for the tripwire, not mapped
                 dw 0            ; dsize
                 dw 0            ; ssize
-                dw 01Dh         ; uaddr: identity page for linear 0xD000
+                dw 01Fh         ; uaddr: identity page for linear 0x1F000
                 dw 1            ; mode = EXE (program WIN_TEXT)
 
 _TEXT   ends

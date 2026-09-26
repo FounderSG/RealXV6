@@ -202,6 +202,7 @@ void ssig(void);
 void kill(void);
 void times(void);
 void psinfo(void);
+void halt(void);
 
 /* slp.c */
 void swtch(void);
@@ -345,6 +346,7 @@ void outportb(unsigned port, unsigned char val);
 unsigned inport(unsigned port);
 unsigned char inportb(unsigned port);
 void idle(void);
+void stopit(void);
 void putchar(char c);
 void pc_init(void);
 

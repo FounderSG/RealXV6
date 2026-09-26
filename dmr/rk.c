@@ -107,6 +107,23 @@ void devstart(struct buf *bp)
         n = 1;
     }
 
+    /*
+     * ideintr walks the transfer by segment, so a request runs forward through
+     * core instead of folding back into the 64K segment it starts in, and the
+     * wall it can reach is the top of core: USPACE+maxmem is exactly where the
+     * VMM's WIN_TEXT window begins, and that page's identity mapping is gone,
+     * so a single page of overrun writes into the running process's shared
+     * text.  Catch it here rather than let the segment run.
+     *
+     * One swap image is not the largest n: swgrow (ken/slp.c) inflates p_size
+     * to p_size+need across its round trip, so exec's no-core fallback can ask
+     * for close to two images at once.  The real bound is the block sched can
+     * allocate, maxmem pages; the first test holds n to it so that n*32 stays
+     * small enough not to underflow the second.
+     */
+    if(n > (uint)maxmem * (PAGESIZ/512) ||
+       FP_SEG(p) > (uint)(USPACE + maxmem) * (PAGESIZ/16) - n * 32)
+        panic("ide xfer range");
     ideio(bp->b_blkno + NRKBLK * minor(bp->b_dev), n, p, bp->b_flags&B_READ);
 }
 

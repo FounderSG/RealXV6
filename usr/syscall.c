@@ -45,6 +45,7 @@
 #define SYS_setgid     46
 #define SYS_getgid     47
 #define SYS_sig        48
+#define SYS_halt       49
 
 int syscall(int fn, int r0, ...);
 int r0, r1, r3;
@@ -165,11 +166,17 @@ char *sbrk(int incr)
 {
     static char *cur = 0;
     char *old;
+    uint new;
 
     if(cur == 0)
         cur = end;          /* first call: the break starts at end of BSS */
     old = cur;
-    if(brk(cur + incr) != 0)
+    /* An offset is 16 bits: a sum that rounds past the top of the segment
+     * comes back as a small, legal-looking break the kernel would accept. */
+    new = (uint)cur + (uint)incr;
+    if(incr >= 0 ? new < (uint)cur : new > (uint)cur)
+        return (char *)-1;
+    if(brk((char *)new) != 0)
         return (char *)-1;
     cur += incr;
     return old;
@@ -259,6 +266,11 @@ int kill(int pid, int signalNo)
 int psinfo(int index, void *buf)
 {
     return syscall(SYS_psinfo, index, buf);
+}
+
+int halt(void)
+{
+    return syscall(SYS_halt, -1);
 }
 
 int dup(int fd)

@@ -90,13 +90,13 @@ runcmd(struct cmd *cmd)
     close(rcmd->fd);
     switch(rcmd->mode){
       case O_READ: 
-        p[0] = open(rcmd->file, FREAD); 
+        p[0] = open(rcmd->file, 0); 
         break;
       case O_WRITE: 
         p[0] = creat(rcmd->file, 0666); 
         break;
       case O_APPEND: 
-        p[0] = open(rcmd->file, FWRITE); 
+        p[0] = open(rcmd->file, 1); 
         if(p[0]>=0) seek(p[0], 0, 2);
         break;
     }

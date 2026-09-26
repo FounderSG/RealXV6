@@ -4,33 +4,62 @@
  *	ps - process status
  *	examine and print certain things about processes
  *
- *	The privileged work is done by the kernel: psinfo() copies out proc[i]
- *	plus a 512-byte image of the top of that process's user stack (the
- *	argument vector exec leaves at USTACK).  ps never reads /dev/mem or
- *	/dev/kmem and never needs to know the physical memory layout.
+ *	The privileged work is done by the kernel: psinfo() fills in the struct
+ *	below -- the fields ps prints, plus an image of the argument frame exec
+ *	leaves on that process's stack.  ps never reads /dev/mem or /dev/kmem,
+ *	and needs no kernel header: stkbase says where the image came from, or
+ *	is 0 when the kernel captured no frame, and the loop stops when psinfo
+ *	reports the end of the proc table.
  */
 
-#include "../h/param.h"
-#include "../h/proc.h"
+/*
+ * The psinfo() contract.  The kernel declares the same fields in the same
+ * order ahead of psinfo() in ken/sys4.c, stopping at stkbase: it copies the
+ * frame image out separately, straight into stk[].  Keep the two in step,
+ * and keep any new field ahead of stk[].
+ */
+#define STKSIZ	512
 
 struct psbuf {
-	struct proc pr;
-	char stk[512];          /* arg-frame image: top 512-block of the stack page */
+	int	p_stat;		/* 0 = free slot, else index into "0SWRIZT" */
+	int	p_flag;
+	int	p_pri;		/* priority, negative is high */
+	int	p_uid;
+	int	p_pid;
+	int	p_ppid;
+	int	p_addr;
+	int	p_wchan;
+	int	stkbase;	/* user address stk[0] came from; 0 = no frame */
+	char	stk[STKSIZ];	/* image of the argument frame */
 } info;
-
-#define SBASE ((USTACK-2) & ~0x1FF)  /* base of SP's 512-block = virtual addr of stk[0] */
 
 void prcom(void);
 
-/* read a word from the captured stack image; caller checks inrange() first */
-int sword(int v)
+/*
+ * Frame addresses are turned into offsets into stk[] and never compared
+ * against an absolute top: the frame can sit high enough that stkbase +
+ * STKSIZ wraps to 0, which would make every absolute test misfire.  An
+ * address outside the frame wraps to a huge offset and fails the same test.
+ *
+ * exec leaves the frame's top word unused and stores the initial SP in the
+ * word below it, so the SP always sits at SPOFF into the captured image
+ * whatever address the frame has on this port.
+ */
+#define SPOFF	(STKSIZ - 4)
+uint stkoff(uint v)
 {
-	return *(int *)(info.stk + (v - SBASE));
+	return v - (uint)info.stkbase;
 }
 
-int inrange(int v)
+/* read a word from the captured stack image; caller checks inrange() first */
+int sword(uint v)
 {
-	return v >= SBASE && v <= USTACK - 2;
+	return *(int *)(info.stk + stkoff(v));
+}
+
+int inrange(uint v)
+{
+	return stkoff(v) <= STKSIZ - 2;
 }
 
 main()
@@ -38,25 +67,24 @@ main()
 	int i;
 
 	printf(" F S UID   PID   PRI ADDR  WCHAN COMMAND\n");
-	for (i = 0; i < NPROC; i++) {
-		psinfo(i, &info);
-		if (info.pr.p_stat == 0)
+	for (i = 0; psinfo(i, &info) >= 0; i++) {
+		if (info.p_stat == 0)
 			continue;
-		printf("%2x %c%4d", info.pr.p_flag,
-			"0SWRIZT"[info.pr.p_stat], info.pr.p_uid & 0377);
-		printf("%6u", info.pr.p_pid);
-		printf("%6d%5x", info.pr.p_pri, info.pr.p_addr);
-		if (info.pr.p_wchan)
-			printf("%7x", info.pr.p_wchan);
+		printf("%2x %c%4d", info.p_flag,
+			"0SWRIZT"[info.p_stat], info.p_uid);
+		printf("%6u", info.p_pid);
+		printf("%6d%5x", info.p_pri, info.p_addr);
+		if (info.p_wchan)
+			printf("%7x", info.p_wchan);
 		else
 			printf("       ");
-		if (info.pr.p_stat == 5)
+		if (info.p_stat == 5)
 			printf(" <defunct>");
-		else if (info.pr.p_pid == 0)
+		else if (info.p_pid == 0)
 			printf(" swaper");
-		else if (info.pr.p_pid == 1)
+		else if (info.p_pid == 1)
 			printf(" init");
-		else if (info.pr.p_tsize != 0)
+		else if (info.stkbase != 0)
 			prcom();
 		printf("\n");
 	}
@@ -65,24 +93,24 @@ main()
 
 void prcom(void)
 {
-	int sp, argc, argv, ai;
-	int j, n, k;
+	uint sp, argv, ai, k;
+	int argc, j, n;
 	char argbuf[17];
 
-	sp = sword(USTACK - 2);
+	sp = (uint)sword((uint)info.stkbase + SPOFF);
 	if (!inrange(sp) || !inrange(sp + 2))
 		return;
 	argc = sword(sp);
-	argv = sword(sp + 2);
+	argv = (uint)sword(sp + 2);
 	printf(" ");
 	for (j = 0; j < argc && j < 8; j++) {
 		if (!inrange(argv + j * 2))
 			break;
-		ai = sword(argv + j * 2);
-		if (ai < SBASE || ai >= USTACK)
+		ai = (uint)sword(argv + j * 2);
+		k = stkoff(ai);
+		if (k >= STKSIZ)
 			break;
-		k = ai - SBASE;
-		for (n = 0; n < 16 && k < 512 && info.stk[k]; n++)
+		for (n = 0; n < 16 && k < STKSIZ && info.stk[k]; n++)
 			argbuf[n] = info.stk[k++];
 		argbuf[n] = 0;
 		printf("%s", argbuf);

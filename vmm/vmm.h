@@ -116,10 +116,11 @@ struct tss_full {
  * privileged op -> SIGINS. */
 #define URET_VECTOR       0x82
 
-/* Linear base of the WIN_U window (pt0[0x1D]).  The guest reaches its u-area
- * (and the kernel stack at its top, 0xE000) via GUEST_CS:0xD000..0xDFFF, which
- * maps to linear 0x1D000; the VMM reaches the same physical page here. */
-#define WIN_U_LINEAR   0x1D000u
+/* Linear base of the WIN_U window (pt0[0x1F], the last page of the guest
+ * kernel segment).  The guest reaches its u-area (and the kernel stack at its
+ * top, the segment top) via GUEST_CS:0xF000..0xFFFF, which maps to linear
+ * 0x1F000; the VMM reaches the same physical page here. */
+#define WIN_U_LINEAR   0x1F000u
 
 /* Descriptor passed by the guest kernel to HVC_SUREG (7 x u16, packed).
  * mode=0: single-seg process, program WIN_U only.

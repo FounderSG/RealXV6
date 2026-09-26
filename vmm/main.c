@@ -110,7 +110,7 @@ static void build_pt0u(u16 taddr, u16 tsize, u16 daddr, u16 dsize, u16 ssize, u1
 
     if (mode == 1) {
         /* EXE: WIN_TEXT (0xA0..) RO user (0x5), sparse WIN_DATA (0xD0..) RW
-         * user (0x7) -- mirroring the kernel view, but with NO 0x1D entry: the
+         * user (0x7) -- mirroring the kernel view, but with NO 0x1F entry: the
          * u-area / kernel stack is invisible to user, as in V6. */
         for (k = 0; k < tsize; k++)
             pt0u[0xA0 + k] = ((u32)(taddr + k) << 12) | 0x5u;
@@ -129,7 +129,7 @@ static void build_pt0u(u16 taddr, u16 tsize, u16 daddr, u16 dsize, u16 ssize, u1
 
 /* Bootsect loads vmm.bin + unix.com together at phys 0x08000:
  *   0x08000..0x0BFFF  vmm.bin  (sectors 1..32, ~16 KB budget)
- *   0x0C000..0x13FFF  unix.com (sectors 33..96, 32 KB embedded for VMM memcpy)
+ *   0x0C000..0x17DFF  unix.com (sectors 33..127, 47.5 KB embedded for VMM memcpy)
  * We memcpy unix.com to its expected guest address 0x10100 before V86 entry.
  * The blob size must exceed unix.com's actual size: bytes past it copy as zeros,
  * and truncating the kernel's tail (CONST strings, bdevsw/cdevsw) wipes the
@@ -139,7 +139,9 @@ static void build_pt0u(u16 taddr, u16 tsize, u16 daddr, u16 dsize, u16 ssize, u1
 #define GUEST_IP         0x0100
 #define UNIX_SRC_LINEAR  0x0C000
 #define UNIX_DST_LINEAR  0x10100
-#define UNIX_BLOB_SIZE   32768       /* 32 KB; must be >= sizeof(unix.com) */
+#define UNIX_BLOB_SIZE   48640       /* sectors 33..127; must be >= sizeof(unix.com).
+                                      * A -hd -d2 kernel is ~39 KB, so the release
+                                      * kernel's 24 KB is not the binding size here. */
 
 /* --------------------------------------------------------------------------
  * Install IDT entries 0..31 (CPU exceptions).  Hardware-IRQ vectors and
@@ -418,8 +420,8 @@ static void hyper_dispatch(struct trap_frame *tf)
         u16 uaddr = d[5], mode  = d[6];
         u32 *pt0  = (u32 *)0x3000;
         u32  k;
-        /* Always remap WIN_U (1 page @ linear 0xD000, pt0[0x1D]). */
-        pt0[0x1D] = ((u32)uaddr << 12) | 0x7u;
+        /* Always remap WIN_U (1 page @ linear 0x1F000, pt0[0x1F]). */
+        pt0[0x1F] = ((u32)uaddr << 12) | 0x7u;
 
         if (mode == 1) {
             /* Tripwire: an EXE sureg with a NULL data block or NULL u-page
@@ -601,7 +603,7 @@ static void check_wild_out(struct trap_frame *tf, unsigned port)
 /* --------------------------------------------------------------------------
  * Reflect a user #PF to the guest as a trap on the KERNEL stack (the user SP
  * may be inside the not-present stack gap, so it cannot be used).  Push, at
- * the top of the u-area kernel stack (WIN_U, top = 0xE000), the user iret
+ * the top of the u-area kernel stack (WIN_U, top = the segment top), the user iret
  * frame {ip,cs,flags} plus {fault_off, user_sp, user_ss}, then vector CS:IP to
  * _segflt_isr with SS:SP = kernel stack.  The faulting user's GP registers and
  * DS/ES are left live in tf so _segflt_isr's EnterISR captures them into a
@@ -611,19 +613,19 @@ static void check_wild_out(struct trap_frame *tf, unsigned port)
  * ------------------------------------------------------------------------ */
 static void pfault_trap(struct trap_frame *tf, u16 fault_off)
 {
-    u16 *ktop = (u16 *)(WIN_U_LINEAR + 0x1000u);  /* just past kernel stack top (0xE000) */
+    u16 *ktop = (u16 *)(WIN_U_LINEAR + 0x1000u);  /* just past kernel stack top */
     enter_kmode();                   /* a user #PF vectors onto the kernel stack */
-    ktop[-1] = (u16)tf->ss_v86;      /* 0xDFFE  user_ss */
-    ktop[-2] = (u16)tf->esp_v86;     /* 0xDFFC  user_sp */
-    ktop[-3] = fault_off;            /* 0xDFFA */
-    ktop[-4] = (u16)tf->eflags;      /* 0xDFF8  user flags */
-    ktop[-5] = (u16)tf->cs;          /* 0xDFF6  user cs */
-    ktop[-6] = (u16)tf->eip;         /* 0xDFF4  user ip */
+    ktop[-1] = (u16)tf->ss_v86;      /* 0xFFFE  user_ss */
+    ktop[-2] = (u16)tf->esp_v86;     /* 0xFFFC  user_sp */
+    ktop[-3] = fault_off;            /* 0xFFFA */
+    ktop[-4] = (u16)tf->eflags;      /* 0xFFF8  user flags */
+    ktop[-5] = (u16)tf->cs;          /* 0xFFF6  user cs */
+    ktop[-6] = (u16)tf->eip;         /* 0xFFF4  user ip */
 
     tf->cs      = GUEST_CS;
     tf->eip     = (u32)g_segflt_isr_ip;
     tf->ss_v86  = GUEST_CS;
-    tf->esp_v86 = 0xE000u - 12u;     /* 0xDFF4: SP at the user ip word */
+    tf->esp_v86 = 0xFFF4u;           /* SP at the user ip word */
     tf->eflags  = (tf->eflags & ~(u32)0x200u) | (u32)(1u << 17); /* VM=1, IF=0 */
     /* leave tf->ds, tf->es and tf->eax..edi = faulting user state for EnterISR */
 }
@@ -633,32 +635,32 @@ static void pfault_trap(struct trap_frame *tf, u16 fault_off)
  * trap on the kernel stack -- the SIGINS channel, the x86 stand-in for the
  * PDP-11 illegal-instruction/BPT/EMT/IOT traps.  Frame construction is
  * identical to pfault_trap (same kernel-stack layout at the top of WIN_U),
- * except the word at 0xD3FA carries a trap TYPE code instead of a fault offset,
+ * except the word at 0xFFFA carries a trap TYPE code instead of a fault offset,
  * and it vectors to _privflt_isr.
  *
  * The pushed ip is the FAULTING instruction (tf->eip is not advanced): a
  * caught-and-returned SIGINS re-executes and re-faults, matching PDP-11
  * re-execution semantics; the default action (core+exit) never returns anyway.
  *
- * Trap type codes (word at 0xD3FA):  1 = privileged operation (everything ->
+ * Trap type codes (word at 0xFFFA):  1 = privileged operation (everything ->
  * SIGINS), 2 = breakpoint (SIGTRC), 3 = arithmetic (SIGFPT),
  * 4 = illegal instruction (SIGINS, #UD).
  * ------------------------------------------------------------------------ */
 static void privflt_trap(struct trap_frame *tf, u16 type)
 {
-    u16 *ktop = (u16 *)(WIN_U_LINEAR + 0x1000u);  /* just past kernel stack top (0xE000) */
+    u16 *ktop = (u16 *)(WIN_U_LINEAR + 0x1000u);  /* just past kernel stack top */
     enter_kmode();                   /* the fault vectors onto the kernel stack */
-    ktop[-1] = (u16)tf->ss_v86;      /* 0xDFFE  user_ss */
-    ktop[-2] = (u16)tf->esp_v86;     /* 0xDFFC  user_sp */
-    ktop[-3] = type;                 /* 0xDFFA  trap type code */
-    ktop[-4] = (u16)tf->eflags;      /* 0xDFF8  user flags */
-    ktop[-5] = (u16)tf->cs;          /* 0xDFF6  user cs */
-    ktop[-6] = (u16)tf->eip;         /* 0xDFF4  user ip (faulting instr, not advanced) */
+    ktop[-1] = (u16)tf->ss_v86;      /* 0xFFFE  user_ss */
+    ktop[-2] = (u16)tf->esp_v86;     /* 0xFFFC  user_sp */
+    ktop[-3] = type;                 /* 0xFFFA  trap type code */
+    ktop[-4] = (u16)tf->eflags;      /* 0xFFF8  user flags */
+    ktop[-5] = (u16)tf->cs;          /* 0xFFF6  user cs */
+    ktop[-6] = (u16)tf->eip;         /* 0xFFF4  user ip (faulting instr, not advanced) */
 
     tf->cs      = GUEST_CS;
     tf->eip     = (u32)g_privflt_isr_ip;
     tf->ss_v86  = GUEST_CS;
-    tf->esp_v86 = 0xE000u - 12u;     /* 0xDFF4: SP at the user ip word */
+    tf->esp_v86 = 0xFFF4u;           /* SP at the user ip word */
     tf->eflags  = (tf->eflags & ~(u32)0x200u) | (u32)(1u << 17); /* VM=1, IF=0 */
     /* leave tf->ds, tf->es and tf->eax..edi = faulting user state for EnterISR */
 }
@@ -1010,7 +1012,7 @@ void trap_dispatch(struct trap_frame *tf)
 {
     /* Entry rule: a trap from user leaves CR3 = PD_u, but the emulator must
      * reach the kernel view -- pfault_trap/privflt_trap write the kernel-stack
-     * frame through WIN_U (0x1D000), absent from PD_u -- so load PD_k before
+     * frame through WIN_U (0x1F000), absent from PD_u -- so load PD_k before
      * touching any of it (i.e. before trap_dispatch_inner's trace_record). */
     if (!g_kmode)
         load_cr3(PD_K_PHYS);
@@ -1089,9 +1091,8 @@ void vmm_main(void)
     }
 
     /* Relocate the embedded unix.com to its expected guest address.
-     * SRC=0xC000 and DST=0x10100 overlap (SRC ends at 0x10FFF, inside DST
-     * range 0x10100..0x150FF), so memcpy backwards to avoid corrupting
-     * unread source bytes. */
+     * SRC=0xC000..0x17DFF and DST=0x10100..0x1BEFF overlap, so memcpy
+     * backwards to avoid corrupting unread source bytes. */
     {
         u8       *dst = (u8 *)(UNIX_DST_LINEAR + UNIX_BLOB_SIZE);
         const u8 *src = (const u8 *)(UNIX_SRC_LINEAR + UNIX_BLOB_SIZE);
